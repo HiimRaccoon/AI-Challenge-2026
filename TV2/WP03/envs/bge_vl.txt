@@ -1,4 +1,0 @@
-# Transformers 4.45.2 is the version recommended by BAAI for BGE-VL-CLIP.
-transformers==4.45.2
-pillow==11.1.0
-sympy>=1.13

@@ -34,3 +34,37 @@ def test_diversity_caps_per_video():
     fused = fuse_kis({"visual": visual}, top_k=100)
     same_video = [c for c in fused if c.video_id == "L01_V001"]
     assert len(same_video) <= 5
+
+
+def test_weighted_rrf_prioritizes_higher_weighted_branch():
+    visual = [_cand("L01_V001", 100, 5000, "visual", 1)]
+    ocr = [_cand("L02_V002", 200, 6000, "ocr", 1)]
+    # With equal weight, both rank 1 have same score
+    fused_equal = fuse_kis({"visual": visual, "ocr": ocr}, weights={"visual": 1.0, "ocr": 1.0})
+    assert len(fused_equal) == 2
+    # With higher OCR weight (e.g. 2.0 vs 0.5), OCR candidate must take Top 1
+    fused_ocr_heavy = fuse_kis({"visual": visual, "ocr": ocr}, weights={"visual": 0.5, "ocr": 2.0})
+    assert fused_ocr_heavy[0].video_id == "L02_V002"
+    # With higher Visual weight (e.g. 2.0 vs 0.2), Visual candidate must take Top 1
+    fused_vis_heavy = fuse_kis({"visual": visual, "ocr": ocr}, weights={"visual": 2.0, "ocr": 0.2})
+    assert fused_vis_heavy[0].video_id == "L01_V001"
+
+
+def test_default_fusion_retains_lower_score_video_for_late_verification():
+    visual = [_cand("L01_V001", 1, 1_000, "visual", 1)]
+    metadata = [_cand("L99_V999", 2, 2_000, "metadata", 100)]
+
+    fused = fuse_kis({"visual": visual, "metadata": metadata}, top_k=100)
+
+    assert [candidate.video_id for candidate in fused] == ["L01_V001", "L99_V999"]
+
+
+def test_relative_score_pruning_remains_available_as_explicit_policy():
+    visual = [_cand("L01_V001", 1, 1_000, "visual", 1)]
+    metadata = [_cand("L99_V999", 2, 2_000, "metadata", 100)]
+
+    fused = fuse_kis(
+        {"visual": visual, "metadata": metadata}, top_k=100, min_relative_score=0.5,
+    )
+
+    assert [candidate.video_id for candidate in fused] == ["L01_V001"]

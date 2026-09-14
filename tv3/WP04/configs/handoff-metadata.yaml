@@ -1,0 +1,13 @@
+# Bootstrap with only DATASETS_ZIP and public visual weights.
+# No OCR/ASR/object results are claimed in this profile.
+schema_version: "1.0.0"
+normalization_version: "vi-unicode-lower-fold-v1"
+modalities:
+  ocr:
+    enabled: false
+  asr:
+    enabled: false
+  object:
+    enabled: false
+  metadata:
+    enabled: true

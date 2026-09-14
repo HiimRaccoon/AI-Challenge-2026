@@ -1,2 +1,0 @@
-{"case_id":"ocr-nfc-001","raw":"Cộng hòa Việt Nam","expected_normalized":"cộng hòa việt nam","expected_no_diacritics":"cong hoa viet nam"}
-{"case_id":"ocr-d-stroke-001","raw":"Đường phố","expected_normalized":"đường phố","expected_no_diacritics":"duong pho"}

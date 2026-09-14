@@ -1,0 +1,33 @@
+# AIC 2026 Pipeline Configuration Example
+# Copy to config.yaml and adjust for your batch
+
+corpus:
+  archives_dir: "zip_video"         # Directory containing ZIP archives
+  raw_dir: "data/raw"               # Output for extracted raw videos
+  video_glob: "**/*.mp4"            # Glob pattern for video files
+  video_id_rule: "stem"             # stem | parent_stem
+  batch_id: "batch1"                # Batch identifier
+
+preprocessing:
+  preprocess_run_id: "run_v3_ultradense"
+  run_dir: "data/runs/run_v3_ultradense" # Never mix with the existing v1/v2 runs
+
+media:
+  decode_probe_points: 5            # Number of decode probe points
+  create_audio: true
+  audio_sample_rate_hz: 16000
+  audio_channels: 1
+  create_proxy: false
+
+keyframes:
+  strategy: "hybrid_shot_max_gap"   # hybrid_shot_max_gap | uniform | shot_only
+  threshold: 0.65                   # Histogram correlation threshold for shot boundary (0.0-1.0)
+  target_eval_fps: 10.0             # Frames evaluated per second before selection
+  min_gap_ms: 250                   # Cooldown for shot-boundary keyframes
+  max_gap_ms: 1000                  # Mandatory retrieval support-frame coverage
+  dedup_threshold: 12               # Applies to shot frames; never removes max-gap support frames
+  thumbnail_width: 240
+  thumbnail_height: 180
+  jpeg_quality: 95                  # JPEG compression quality
+  thumbnail_quality: 85
+  max_workers: 4                    # Parallel workers for extraction

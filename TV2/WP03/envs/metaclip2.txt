@@ -1,4 +1,0 @@
-# Must include MetaCLIP 2 support; model weights are loaded at the pinned Hub revision.
-transformers>=4.56,<5
-pillow==11.1.0
-sympy>=1.13

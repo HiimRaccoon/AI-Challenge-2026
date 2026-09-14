@@ -20,24 +20,54 @@ as the schema hand-off TV5 needs -- no separate schema doc to keep in sync.
 from __future__ import annotations
 
 import os
+import mimetypes
+import re
+from contextlib import asynccontextmanager
+from io import BytesIO
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import fixtures
 from .cli import _load_config, build_services
 from .kis_pipeline import KisServices, run_kis_query
-from .trake_pipeline import run_trake_query
-from .wp11_vqa import RuleBasedFallbackEngine, answer_query
+from .contracts import (
+    CanonicalFrameReference, OcrEvidence, SearchRequest,
+    exact_neighbor_response_is_safe,
+)
+from .media_identity import resolve_derivative_image_path, resolve_original_media_path
+from .exact_identity import certified_step_request
+from .trake_pipeline import rerun_trake_event, run_trake_queries
+from .wp11_vqa import (
+    OllamaAnswerEngine, answer_query, build_evidence_pack, direct_answer_query,
+)
+from .external_assist import ExternalQueryAssist
+from .qa_frame_selector import answer_support_span, select_answer_frames
+from .qa_reranker import (
+    qa_evidence_window_ms,
+    rank_answerable_evidence,
+    select_answerable_shortlist,
+    select_evidence_candidates,
+)
+from .qa_verifier import verify_answer
+from .visual_verifier import OllamaVisualVerifier, canonical_interval_frames, canonical_qa_frames
+from .qa_dense_reader import DenseOcrReader, ProvenJpegFrame
+from .qa_query_plan import QaQueryPlan, build_qa_query_plan
 
 FIXTURE_MODE = os.environ.get("TV4_FIXTURE_MODE", "0") == "1"
 CONFIG_PATH = os.environ.get("TV4_CONFIG", "configs/default.yaml")
 CORS_ORIGINS = [o.strip() for o in os.environ.get("TV4_CORS_ORIGINS", "*").split(",") if o.strip()]
 
 _services: KisServices | None = None
+
+_MEDIA_CHUNK_BYTES = 64 * 1024
+_EXACT_IMAGE_MAX_DECODED_FRAMES = 256
 
 
 class TV4ConfigError(RuntimeError):
@@ -51,9 +81,55 @@ def _get_services() -> KisServices:
             config = _load_config(CONFIG_PATH)
             config["_config_dir"] = str(Path(CONFIG_PATH).parent)
             _services = build_services(config)
+            start_warmup = getattr(_services.visual, "start_warmup", None)
+            if callable(start_warmup):
+                start_warmup()
         except Exception as exc:
             raise TV4ConfigError(f"failed to load config/services from {CONFIG_PATH}: {exc}") from exc
     return _services
+
+
+def _visual_health(services: KisServices) -> dict[str, object]:
+    try:
+        value = services.visual.health()
+    except Exception as exc:
+        return {"available": False, "enabled": True, "reason": type(exc).__name__}
+    return value if isinstance(value, dict) else {
+        "available": False, "enabled": True, "reason": "malformed_health",
+    }
+
+
+def _visual_unavailable_detail(health: dict[str, object]) -> str:
+    warmup = health.get("warmup")
+    if isinstance(warmup, dict) and warmup.get("enabled") is True:
+        status = str(warmup.get("status", "unknown"))
+        error = warmup.get("error")
+        if status != "ready":
+            suffix = f": {error}" if isinstance(error, str) and error else ""
+            return f"TV2 Visual is {status}{suffix}"
+    last_search = health.get("last_search")
+    if isinstance(last_search, dict):
+        error = last_search.get("error") or last_search.get("reason")
+        if error:
+            return f"TV2 Visual unavailable: {error}"
+    return "TV2 Visual unavailable"
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    if not FIXTURE_MODE:
+        try:
+            _get_services()
+        except TV4ConfigError:
+            # Preserve the existing degraded /health response for bad config.
+            pass
+    try:
+        yield
+    finally:
+        if _services is not None:
+            close_visual = getattr(_services.visual, "close", None)
+            if callable(close_visual):
+                close_visual()
 
 
 app = FastAPI(
@@ -61,6 +137,7 @@ app = FastAPI(
     version="0.1.0",
     description="WP07, WP10, WP11, WP12 for AIC 2026. See /docs for the full "
                  "SearchCandidate / VqaResult / TrakeHypothesis schema.",
+    lifespan=_lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -74,6 +151,7 @@ class KisRequest(BaseModel):
     query_text: str
     query_id: str | None = None
     top_k: int = Field(default=100, ge=1, le=100)
+    weights: dict[str, float] | None = None
 
 
 class VqaRequest(BaseModel):
@@ -82,6 +160,7 @@ class VqaRequest(BaseModel):
     query_id: str | None = None
     top_k: int = Field(default=100, ge=1, le=100)
     top_k_answers: int = Field(default=5, ge=1, le=20, description="How many top candidates to actually run the answer engine on (expensive per-call).")
+    weights: dict[str, float] | None = None
 
 
 class TrakeRequest(BaseModel):
@@ -89,6 +168,128 @@ class TrakeRequest(BaseModel):
     events: list[str] | None = None
     query_id: str | None = None
     strategy: str = Field(default="dp", pattern="^(dp|greedy)$")
+    top_k_sequences: int = Field(default=5, ge=1, le=5)
+
+
+class TrakeLockedEvent(BaseModel):
+    event_index: int = Field(ge=0)
+    frame_id: int = Field(ge=0)
+    timestamp_ms: int = Field(ge=0)
+
+
+class TrakeRerunRequest(BaseModel):
+    query_text: str = Field(min_length=1)
+    events: list[str] = Field(min_length=2)
+    event_index: int = Field(ge=0)
+    video_id: str = Field(min_length=1)
+    locked_events: list[TrakeLockedEvent] = Field(default_factory=list)
+    query_id: str | None = None
+    exclude_frame_id: int | None = Field(default=None, ge=0)
+    top_k: int = Field(default=5, ge=1, le=5)
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.event_index >= len(self.events):
+            raise ValueError("event_index is outside events")
+        indexes = [item.event_index for item in self.locked_events]
+        if len(indexes) != len(set(indexes)):
+            raise ValueError("locked event indexes must be unique")
+        if any(index >= len(self.events) for index in indexes):
+            raise ValueError("locked event index is outside events")
+        if self.event_index in indexes:
+            raise ValueError("target event must be unlocked before rerun")
+        ordered = sorted(self.locked_events, key=lambda item: item.event_index)
+        if any(
+            left.timestamp_ms >= right.timestamp_ms
+            for left, right in zip(ordered, ordered[1:])
+        ):
+            raise ValueError("locked event timestamps must be strictly increasing")
+
+
+class ExactNeighborRequest(BaseModel):
+    video_id: str
+    frame_id: int = Field(ge=0)
+    timestamp_ms: int = Field(ge=0)
+    offsets: list[int] = Field(default_factory=lambda: [0])
+    certified_anchor_frame_id: int | None = Field(default=None, ge=0)
+    certified_anchor_timestamp_ms: int | None = Field(default=None, ge=0)
+    cumulative_offset: int = 0
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.video_id.strip() or not self.offsets or len(self.offsets) > 128:
+            raise ValueError("video_id and 1-128 offsets are required")
+        if (self.certified_anchor_frame_id is None) != (self.certified_anchor_timestamp_ms is None):
+            raise ValueError("certified anchor frame_id and timestamp_ms must be supplied together")
+
+
+class FeedbackStartApiRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    original_query: str = Field(min_length=1)
+
+
+class FeedbackRefineApiRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    video_id: str = Field(min_length=1)
+    frame_id: int = Field(ge=0)
+    source_candidate_frame_id: int | None = Field(default=None, ge=0)
+    feedback_text: str = Field(min_length=1, max_length=300)
+    expected_revision: int = Field(ge=0)
+
+
+class FeedbackUndoApiRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    expected_revision: int = Field(ge=0)
+
+
+class FeedbackResetApiRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    expected_revision: int = Field(ge=0)
+
+
+
+def _parse_byte_range(range_header: str, file_size: int) -> tuple[int, int]:
+    """Parse exactly one browser byte range into inclusive bounds."""
+    if file_size <= 0 or not range_header.startswith("bytes="):
+        raise ValueError("invalid byte range")
+    value = range_header[6:].strip()
+    if "," in value or "-" not in value:
+        raise ValueError("only one byte range is supported")
+    left, right = value.split("-", 1)
+    if not left:
+        suffix = int(right)
+        if suffix <= 0:
+            raise ValueError("invalid suffix range")
+        return max(0, file_size - suffix), file_size - 1
+    start = int(left)
+    end = int(right) if right else file_size - 1
+    if start < 0 or start >= file_size or end < start:
+        raise ValueError("range is outside the file")
+    return start, min(end, file_size - 1)
+
+
+def _iter_file_range(path: Path, start: int, end: int):
+    remaining = end - start + 1
+    with path.open("rb") as handle:
+        handle.seek(start)
+        while remaining:
+            chunk = handle.read(min(_MEDIA_CHUNK_BYTES, remaining))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+            yield chunk
+
+
+def _media_path_or_404(services: KisServices, video_id: str) -> Path:
+    if services.original_media_root is None:
+        raise HTTPException(status_code=503, detail="original media unavailable: root is unconfigured")
+    try:
+        return resolve_original_media_path(
+            services.original_media_root, video_id, services.media_registry,
+            services.preprocess_run_id, services.allowed_media_extensions,
+        )
+    except ValueError as exc:
+        # Deliberately do not distinguish unknown, traversal and malformed
+        # registry entries to browser clients.
+        raise HTTPException(status_code=404, detail="original media unavailable") from exc
 
 
 @app.get("/health")
@@ -99,7 +300,48 @@ def health() -> dict[str, Any]:
         services = _get_services()
     except TV4ConfigError as exc:
         return {"status": "degraded", "mode": "live", "error": str(exc)}
-    return {"status": "ok", "mode": "live", "preprocess_run_id": services.preprocess_run_id}
+    def safe(name: str, call: Any) -> tuple[str, dict[str, object]]:
+        try:
+            value = call()
+            if name == "tv1":
+                return name, {"available": True, "response": value}
+            return name, value if isinstance(value, dict) else {"available": False, "reason": "malformed"}
+        except Exception as exc:
+            return name, {"available": False, "reason": type(exc).__name__}
+
+    checks: list[tuple[str, Any]] = [
+        ("tv1", services.tv1.health),
+        ("tv2_visual", services.visual.health),
+        ("tv3", services.tv3.health),
+        ("dense_ocr", (services.dense_ocr or DenseOcrReader.from_environment()).health),
+    ]
+    if services.refine is not None:
+        checks.append(("tv2_refine", services.refine.health))
+    else:
+        checks.append(("tv2_refine", lambda: {"available": False, "enabled": False, "reason": "disabled"}))
+    with ThreadPoolExecutor(max_workers=len(checks), thread_name_prefix="health") as executor:
+        dependencies = dict(executor.map(lambda item: safe(item[0], item[1]), checks))
+    # A deliberately disabled optional dependency is a supported operating
+    # mode, not an outage.  Keep it visible in ``dependencies`` without
+    # making the whole live service look unhealthy.
+    unavailable = [
+        name for name, value in dependencies.items()
+        if value.get("available") is not True and value.get("enabled") is not False
+    ]
+    partial = [
+        name for name, value in dependencies.items()
+        if value.get("available") is True and value.get("degraded") is True
+    ]
+    return {
+        "status": "degraded" if unavailable or partial else "ok",
+        "mode": "live",
+        "preprocess_run_id": services.preprocess_run_id,
+        "dependencies": dependencies,
+        "degraded_reasons": (
+            [f"{name}_unavailable" for name in unavailable]
+            + [f"{name}_partial" for name in partial]
+        ),
+    }
 
 
 @app.post("/kis/search")
@@ -108,48 +350,465 @@ def kis_search(req: KisRequest) -> dict[str, Any]:
         return fixtures.KIS_RESPONSE
     try:
         services = _get_services()
-        ranked = run_kis_query(req.query_text, services, query_id=req.query_id, top_k=req.top_k)
+        initial_visual_health = _visual_health(services)
+        warmup = initial_visual_health.get("warmup")
+        if (
+            isinstance(warmup, dict)
+            and warmup.get("enabled") is True
+            and warmup.get("status") != "ready"
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail=_visual_unavailable_detail(initial_visual_health),
+                headers={"Retry-After": "5"},
+            )
+        assist = ExternalQueryAssist.from_environment()
+        ranked = run_kis_query(
+            req.query_text, services, query_id=req.query_id, top_k=req.top_k,
+            weights=req.weights,
+            visual_query_texts=assist.visual_queries(req.query_text),
+        )
     except TV4ConfigError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"KIS pipeline failed: {exc}") from exc
+    visual_health = _visual_health(services)
+    visual_degraded = (
+        visual_health.get("enabled") is True
+        and visual_health.get("available") is not True
+    )
+    if not ranked and visual_degraded:
+        raise HTTPException(
+            status_code=503,
+            detail=_visual_unavailable_detail(visual_health),
+            headers={"Retry-After": "5"},
+        )
     query_id = ranked[0].query_id if ranked else (req.query_id or "kis-query")
-    return {"query_id": query_id, "candidates": [c.to_json() for c in ranked]}
+    return {
+        "query_id": query_id,
+        "candidates": [c.to_json() for c in ranked],
+        "status": "degraded" if visual_degraded else "ok",
+        "degraded_reasons": ["tv2_visual_unavailable"] if visual_degraded else [],
+    }
 
 
 @app.post("/vqa/answer")
 def vqa_answer(req: VqaRequest) -> dict[str, Any]:
     if FIXTURE_MODE:
-        return fixtures.VQA_RESPONSE
+        return fixtures.vqa_fixture_response(req.query_id)
+    # The visual index is English-biased, whereas OCR/ASR are queried in the
+    # user's original language by run_kis_query. Expand only audited concepts.
+    engine = OllamaAnswerEngine.from_environment()
+    assist = ExternalQueryAssist.from_environment()
+    query_plan = build_qa_query_plan(req.query_text, req.question)
+    visual_queries = assist.vqa_visual_queries(
+        engine.visual_retrieval_query(req.query_text), req.question,
+    )
     try:
         services = _get_services()
-        ranked = run_kis_query(req.query_text, services, query_id=req.query_id, top_k=req.top_k)
+        ranked = run_kis_query(
+            req.query_text,
+            services,
+            query_id=req.query_id,
+            top_k=req.top_k,
+            weights=req.weights,
+            visual_query_texts=visual_queries,
+            task="VQA",
+            question=req.question,
+            additional_branches=assist.branches(req.query_text),
+            preserve_visual_primary_order=not query_plan.prefer_video_consensus,
+        )
+        relation_query_index = next(
+            (
+                index for index, query in enumerate(visual_queries)
+                if query_plan.relation_query and query.casefold() == query_plan.relation_query.casefold()
+            ),
+            None,
+        )
+        if relation_query_index is not None:
+            ranked = [
+                replace(
+                    candidate,
+                    provenance={
+                        **candidate.provenance,
+                        "qa_relation_query_match": relation_query_index
+                        in set(candidate.provenance.get("visual_query_variants", ())),
+                        "qa_relation_query_index": relation_query_index,
+                        "qa_relation_required_support": min(3, len(visual_queries)),
+                    },
+                )
+                for candidate in ranked
+            ]
+        if (
+            query_plan.requires_multi_frame
+            and query_plan.interval_start_ms is not None
+            and query_plan.interval_end_ms is not None
+        ):
+            # A bounded temporal question identifies a video segment, not an
+            # arbitrary lookalike later in the same video. Prefer retrieval
+            # evidence already inside the requested interval before building
+            # the expensive three-video QA shortlist. This is a soft stable
+            # reorder: no candidate is removed and the original rank is kept
+            # in provenance for audit.
+            interval_start = query_plan.interval_start_ms
+            interval_end = query_plan.interval_end_ms
+            ranked = [
+                replace(
+                    candidate,
+                    rank=rank,
+                    provenance={
+                        **candidate.provenance,
+                        "qa_pre_interval_rank": candidate.rank,
+                        "qa_candidate_in_requested_interval": (
+                            interval_start <= candidate.timestamp_ms <= interval_end
+                        ),
+                    },
+                )
+                for rank, candidate in enumerate(
+                    sorted(
+                        ranked,
+                        key=lambda candidate: (
+                            not (interval_start <= candidate.timestamp_ms <= interval_end),
+                            candidate.rank,
+                        ),
+                    ),
+                    start=1,
+                )
+            ]
     except TV4ConfigError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"KIS pipeline failed: {exc}") from exc
     if not ranked:
-        return {"query_id": req.query_id or "vqa-query", "results": []}
-    engine = RuleBasedFallbackEngine()  # TODO(TV4): swap for a real VLM/LLM AnswerEngine before demo
-    results = [
-        answer_query(c, req.question, services.tv1, services.tv3, engine)
-        for c in ranked[: req.top_k_answers]
+        return {
+            "query_id": req.query_id or "vqa-query", "results": [],
+            "retrieval_candidates": [], "verified_candidates": [],
+            "query_plan": query_plan.to_json(),
+        }
+    # Local Ollama answers from retrieval evidence. If its service or model is
+    # unavailable, the engine degrades to the existing conservative fallback.
+    evidence_request = SearchRequest(
+        query_id=ranked[0].query_id,
+        task="VQA",
+        query_text=req.query_text,
+        question=req.question,
+        limit=min(req.top_k, 100),
+    )
+    # Gather evidence for the candidate shortlist before invoking the local
+    # model. A direct, corroborated OCR answer (such as an official locality
+    # sign) is both more reliable and far faster than generating answers for
+    # every unrelated candidate.
+    # Retrieval and answer generation are separate stages. Inspect a bounded
+    # deep pool so an answer-bearing frame at rank 6-20 can still reach the
+    # five expensive answer slots and remain visible to the operator.
+    evidence_pool_size = min(len(ranked), max(req.top_k_answers, 30))
+    candidates = select_evidence_candidates(ranked, evidence_pool_size)
+    inspected_ids = {(c.video_id, c.frame_id) for c in candidates}
+    with ThreadPoolExecutor(max_workers=min(4, len(candidates)), thread_name_prefix="vqa-evidence") as executor:
+        evidence_packs = list(executor.map(
+            lambda positioned: build_evidence_pack(
+                positioned[1], services.tv1, services.tv3, request=evidence_request,
+                window_ms=qa_evidence_window_ms(positioned[0]), search_branches=False,
+            ),
+            enumerate(candidates),
+        ))
+    answerable = rank_answerable_evidence(candidates, evidence_packs, req.question)
+    visual_verifier = OllamaVisualVerifier.from_environment()
+    answerable = _relation_verify_answerable(
+        answerable, req.query_text, req.question, query_plan, services, visual_verifier,
+    )
+    answerable = _dense_read_answerable(
+        answerable, req.question, query_plan, services,
+        services.dense_ocr or DenseOcrReader.from_environment(),
+    )
+    reranked_answerable = rank_answerable_evidence(
+        [item.candidate for item in answerable],
+        [item.evidence for item in answerable],
+        req.question,
+    )
+    answerable = select_answerable_shortlist(
+        reranked_answerable, ranked, req.top_k_answers,
+    )
+    # Keep every answerable window as a human-selectable alternative. A
+    # corroborated OCR answer is still handled without a speculative model
+    # call by ``answer_query`` when its turn is evaluated.
+    candidates = [item.candidate for item in answerable]
+    evidence_packs = [item.evidence for item in answerable]
+    direct_pairs = [
+        (item, direct_answer_query(item.candidate, req.question, item.evidence))
+        for item in answerable
     ]
+    verified_direct_pairs = [
+        (item, result) for item, result in direct_pairs
+        if result is not None and result.verified
+    ]
+    if verified_direct_pairs:
+        # Strong producer-text answers make speculative model calls on lower
+        # candidates unnecessary. Open-vocabulary questions with no direct
+        # extraction still use the normal answer engine below.
+        answerable = [item for item, _ in verified_direct_pairs]
+        results = [result for _, result in verified_direct_pairs]
+    else:
+        with ThreadPoolExecutor(max_workers=min(2, len(candidates)), thread_name_prefix="vqa-answer") as executor:
+            futures = [
+                executor.submit(
+                    answer_query, candidate, req.question, services.tv1, services.tv3, engine,
+                    request=evidence_request, evidence=evidence,
+                )
+                for candidate, evidence in zip(candidates, evidence_packs)
+            ]
+            results = [future.result() for future in futures]
+    fallback_attempted = False
+    # One bounded second wave can inspect deeper retrieval videos when the
+    # initial answer slots all abstain or lack question-specific support.
+    if not any(
+        r.verified and r.answer and verify_answer(req.question, r.answer, r.evidence, producer_supported=r.verified,
+                                                description=req.query_text).supported
+        for r in results
+    ):
+        remaining = [c for c in ranked if (c.video_id, c.frame_id) not in inspected_ids]
+        deeper = select_evidence_candidates(remaining, 30) if remaining else []
+        if deeper:
+            fallback_attempted = True
+            with ThreadPoolExecutor(max_workers=min(4, len(deeper)), thread_name_prefix="vqa-deeper-evidence") as executor:
+                deeper_packs = list(executor.map(
+                    lambda c: build_evidence_pack(
+                        c, services.tv1, services.tv3, request=evidence_request,
+                        window_ms=12_000, search_branches=False,
+                    ), deeper,
+                ))
+            inspected_ids.update((c.video_id, c.frame_id) for c in deeper)
+            deeper_ranked = rank_answerable_evidence(deeper, deeper_packs, req.question)
+            deeper_shortlist = select_answerable_shortlist(deeper_ranked, deeper, req.top_k_answers)
+            with ThreadPoolExecutor(max_workers=min(2, len(deeper_shortlist)), thread_name_prefix="vqa-deeper-answer") as executor:
+                deeper_results = list(executor.map(
+                    lambda item: answer_query(
+                        item.candidate, req.question, services.tv1, services.tv3, engine,
+                        request=evidence_request, evidence=item.evidence, max_controlled_retries=0,
+                    ), deeper_shortlist,
+                ))
+            answerable += deeper_shortlist
+            results += deeper_results
+    # Visual reading uses the strongest answerable windows across both waves.
+    pairs = sorted(zip(results, answerable), key=lambda pair: -pair[1].answerability.total)
+    retrieval_video_rank: dict[str, int] = {}
+    for position, candidate in enumerate(ranked, 1):
+        retrieval_video_rank.setdefault(candidate.video_id, position)
+    if query_plan.requires_visual_read:
+        # Existing OCR density is not evidence that this is the right scene
+        # for image reading. Read the strongest retrieved videos first, using
+        # one answerable window per video before additional windows.
+        pairs.sort(key=lambda pair: (retrieval_video_rank.get(pair[1].candidate.video_id, 101), -pair[1].answerability.total))
+        first_windows, other_windows, seen_videos = [], [], set()
+        for pair in pairs:
+            video_id = pair[1].candidate.video_id
+            if video_id in seen_videos:
+                other_windows.append(pair)
+            else:
+                seen_videos.add(video_id)
+                first_windows.append(pair)
+        pairs = first_windows + other_windows
+    results = [pair[0] for pair in pairs]
+    answerable = [pair[1] for pair in pairs]
+    # Only explicitly planned image-reading questions enter this sequential
+    # stage.  Keeping VLM calls out of the answer thread pool prevents several
+    # candidates from occupying a 12 GB GPU at the same time.
+    visual_answer_frames: dict[int, tuple[Any, ...]] = {}
+    if query_plan.requires_visual_read and visual_verifier.enabled:
+        for result_index, (result, item) in enumerate(zip(results, answerable)):
+            if result_index >= visual_verifier.max_qa_candidates:
+                break
+            if query_plan.requires_multi_frame:
+                frames = canonical_interval_frames(
+                    item.candidate.video_id, services.tv1,
+                    services.derivative_asset_root, services.allowed_image_extensions,
+                    preprocess_run_id=services.preprocess_run_id,
+                    start_ms=query_plan.interval_start_ms or 0,
+                    end_ms=query_plan.interval_end_ms or 0,
+                    limit=visual_verifier.max_images * visual_verifier.max_sequence_candidates,
+                )
+            else:
+                frames = canonical_qa_frames(
+                    item.evidence, services.derivative_asset_root,
+                    services.allowed_image_extensions,
+                    preprocess_run_id=services.preprocess_run_id,
+                    limit=visual_verifier.max_images,
+                )
+            visual_answer_frames[result_index] = frames
+            visual_answer = visual_verifier.answer_qa(
+                f"Scene description: {req.query_text}\nQuestion: {req.question}", query_plan, frames,
+            )
+            if not visual_answer.available or not visual_answer.answer:
+                continue
+            results[result_index] = replace(
+                result,
+                candidate=replace(
+                    result.candidate,
+                    provenance={
+                        **result.candidate.provenance,
+                        "visual_qa_answer": visual_answer.to_json(),
+                    },
+                ),
+                answer=visual_answer.answer,
+                proposal=visual_answer.answer,
+                verified=False,
+                manual_fallback=False,
+                verifier_status="visual_answer_pending_verification",
+                manual_required=False,
+                status="proposal",
+                degraded_reasons=(),
+            )
+    # Scene identity is independent of the proposed answer, including for
+    # questions answered from OCR/ASR. Keep the image checks bounded.
+    scene_checks: dict[int, Any] = {}
+    scene_order = sorted(range(len(results)), key=lambda i: (
+        not verify_answer(req.question, results[i].proposal, results[i].evidence,
+                          producer_supported=results[i].verified).supported,
+        not bool(results[i].proposal),
+        retrieval_video_rank.get(results[i].candidate.video_id, 101),
+        -answerable[i].answerability.total,
+    ))
+    if req.query_text.strip() and visual_verifier.enabled:
+        for index in scene_order[:visual_verifier.max_qa_candidates]:
+            frames = canonical_qa_frames(
+                results[index].evidence, services.derivative_asset_root,
+                services.allowed_image_extensions, preprocess_run_id=services.preprocess_run_id,
+                limit=visual_verifier.max_images,
+            )
+            if services.tv1 is not None:
+                scene_frames = canonical_interval_frames(
+                    results[index].candidate.video_id, services.tv1, services.derivative_asset_root,
+                    services.allowed_image_extensions, preprocess_run_id=services.preprocess_run_id,
+                    start_ms=max(0, results[index].candidate.timestamp_ms - 60_000),
+                    end_ms=results[index].candidate.timestamp_ms + 60_000, limit=visual_verifier.max_images,
+                )
+                frames = scene_frames or frames
+            scene_checks[index] = visual_verifier.verify_scene(req.query_text, frames)
+    verified_results = []
+    for result_index, (r, item) in enumerate(zip(results, answerable)):
+        visual_check = visual_verifier.unavailable(
+            "disabled" if not visual_verifier.enabled else "candidate_limit",
+        )
+        if (
+            visual_verifier.enabled
+            and query_plan.requires_visual_read
+            and result_index < visual_verifier.max_qa_candidates
+        ):
+            visual_frames = visual_answer_frames.get(result_index) or canonical_qa_frames(
+                r.evidence,
+                services.derivative_asset_root,
+                services.allowed_image_extensions,
+                preprocess_run_id=services.preprocess_run_id,
+                limit=visual_verifier.max_images,
+            )
+            visual_check = visual_verifier.verify_qa(
+                f"Scene description: {req.query_text}\nQuestion: {req.question}", r.proposal, visual_frames,
+            )
+        verification = verify_answer(
+            req.question,
+            r.proposal,
+            r.evidence,
+            producer_supported=r.verified,
+            visual_verification=visual_check,
+            description=req.query_text,
+            scene_verification=scene_checks.get(result_index),
+        )
+        support_start_ms, support_end_ms = answer_support_span(r.proposal, r.evidence)
+        answer_confidence = (
+            0.55 * item.answerability.total
+            + 0.45 * verification.final_support_score
+        )
+        verified_results.append((answer_confidence, r, item, verification, support_start_ms, support_end_ms))
+    verified_results.sort(
+        key=lambda row: (
+            not row[3].supported,
+            row[3].scene_supported is not True,
+            row[3].contradiction,
+            -(row[3].scene_score or 0.0),
+            not bool(row[1].answer),
+            -row[0],
+            row[1].candidate.rank,
+            row[1].candidate.video_id,
+            row[1].candidate.timestamp_ms,
+        )
+    )
+    all_verified_results = verified_results
+    verified_results = all_verified_results[:req.top_k_answers]
+    # Keep the strongest retrieval videos available for inspection even when
+    # the model abstains. A wrong but verbose answer must not hide them.
+    reserved_videos = set(list(retrieval_video_rank)[:min(2, max(0, req.top_k_answers - 1))])
+    for video_id in retrieval_video_rank:
+        if video_id not in reserved_videos or any(row[1].candidate.video_id == video_id for row in verified_results):
+            continue
+        replacement = next((row for row in all_verified_results if row[1].candidate.video_id == video_id), None)
+        replace_at = next((i for i in range(len(verified_results) - 1, -1, -1) if verified_results[i][1].candidate.video_id not in reserved_videos), None)
+        if replacement is not None and replace_at is not None:
+            verified_results[replace_at] = replacement
     return {
         "query_id": ranked[0].query_id,
+        "diagnostics": {
+            "evidence_candidates_inspected": len(inspected_ids),
+            "deeper_retrieval_attempted": fallback_attempted,
+            "answer_candidates_evaluated": len(results),
+        },
+        "query_plan": query_plan.to_json(),
+        "retrieval_candidates": [candidate.to_json() for candidate in ranked],
+        "verified_candidates": [
+            {
+                "rank": item.candidate.rank,
+                "video_id": item.candidate.video_id,
+                "frame_id": item.candidate.frame_id,
+                "timestamp_ms": item.candidate.timestamp_ms,
+                "answerability_score": round(item.answerability.total, 6),
+                "relation_verification": item.candidate.provenance.get("qa_relation_verification"),
+                "dense_ocr": item.candidate.provenance.get("dense_ocr"),
+            }
+            for item in answerable
+        ],
         "results": [
             {
-                "rank": r.candidate.rank,
+                "rank": final_rank,
                 "video_id": r.candidate.video_id,
                 "frame_id": r.candidate.frame_id,
                 "timestamp_ms": r.candidate.timestamp_ms,
                 "confidence": r.candidate.confidence,
-                "answer": r.answer,
-                "verified": r.verified,
-                "manual_review": r.manual_fallback,
+                "answer": r.answer if verification.supported else "",
+                "verified": verification.supported,
+                "manual_review": r.manual_fallback or verification.manual_required,
+                "proposal": r.proposal,
+                "approved": r.approved,
+                "verifier_status": "verified" if verification.supported else "insufficient_evidence",
+                "retry_count": r.retry_count,
+                "manual_required": r.manual_required or verification.manual_required,
+                "status": (
+                    r.status
+                    if r.status in {"degraded", "abstained"}
+                    else ("manual_required" if r.manual_required or verification.manual_required else r.status)
+                ),
+                "degraded_reasons": list(r.degraded_reasons),
+                "answerability_score": round(item.answerability.total, 6),
+                "answerability_components": item.answerability.to_json(),
+                "answer_confidence": round(answer_confidence, 6),
+                "verifier_score": round(verification.final_support_score, 6),
+                "independently_supported": verification.supported,
+                "contradiction": verification.contradiction,
+                "verification": verification.to_json(),
+                "scene_verification": scene_checks[results.index(r)].to_json() if results.index(r) in scene_checks else None,
+                "support_start_ms": support_start_ms,
+                "support_end_ms": support_end_ms,
+                "frame_candidates": [
+                    frame.to_json()
+                    for frame in select_answer_frames(
+                        r.proposal, r.evidence, verified=verification.supported,
+                    )
+                ],
                 "evidence": r.evidence.to_json(),
             }
-            for r in results
+            for final_rank, (
+                answer_confidence, r, item, verification, support_start_ms, support_end_ms,
+            ) in enumerate(verified_results, start=1)
         ],
     }
 
@@ -158,24 +817,844 @@ def vqa_answer(req: VqaRequest) -> dict[str, Any]:
 def trake_align(req: TrakeRequest) -> dict[str, Any]:
     if FIXTURE_MODE:
         return fixtures.TRAKE_RESPONSE
+    diagnostics: dict[str, Any] = {}
     try:
         services = _get_services()
-        hyp = run_trake_query(
-            req.query_text, services, events=req.events, query_id=req.query_id, strategy=req.strategy
+        hypotheses = run_trake_queries(
+            req.query_text, services, events=req.events, query_id=req.query_id,
+            strategy=req.strategy, limit=req.top_k_sequences, diagnostics=diagnostics,
         )
     except TV4ConfigError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"TRAKE pipeline failed: {exc}") from exc
-    if hyp is None:
-        return {"query_id": req.query_id or "trake-query", "result": None, "message": "no monotonic alignment found"}
-    return {
-        "query_id": hyp.query_id,
-        "result": {
+    if not hypotheses:
+        return {
+            "query_id": req.query_id or "trake-query",
+            "result": None,
+            "results": [],
+            "message": "no monotonic alignment found",
+            "diagnostics": diagnostics,
+        }
+
+    def serialize_hypothesis(hyp: Any) -> dict[str, Any]:
+        events = []
+        for index, candidate in enumerate(hyp.candidates):
+            alternatives = hyp.event_alternatives[index] if index < len(hyp.event_alternatives) else ()
+            events.append({
+                "event_index": index,
+                "frame_id": candidate.frame_id,
+                "timestamp_ms": candidate.timestamp_ms,
+                "start_ms": candidate.window_start_ms,
+                "end_ms": candidate.window_end_ms,
+                "score": hyp.event_scores[index],
+                "alternatives": [
+                    {
+                        "frame_id": alternative.frame_id,
+                        "timestamp_ms": alternative.timestamp_ms,
+                        "score": alternative.score,
+                        "candidate": alternative.to_json(),
+                    }
+                    for alternative in alternatives
+                ],
+            })
+        return {
+            "rank": hyp.rank,
             "video_id": hyp.video_id,
             "frame_ids": list(hyp.frame_ids),
+            "timestamps_ms": list(hyp.timestamps_ms) if hyp.timestamps_ms else [0] * len(hyp.frame_ids),
             "event_scores": list(hyp.event_scores),
             "aggregate_score": hyp.aggregate_score,
             "preprocess_run_id": hyp.preprocess_run_id,
-        },
+            "candidates": [candidate.to_json() for candidate in hyp.candidates] if hyp.candidates else [],
+            "events": events,
+            "verification": dict(hyp.verification),
+            "verifier_score": hyp.verification.get("final_sequence_score"),
+            "entity_continuity": hyp.verification.get("entity_continuity"),
+            "state_consistency": hyp.verification.get("state_consistency"),
+            "order_consistent": hyp.verification.get("order_consistent"),
+            "story_consistency": hyp.verification.get("story_consistency"),
+        }
+
+    serialized = [serialize_hypothesis(hypothesis) for hypothesis in hypotheses]
+    return {
+        "query_id": hypotheses[0].query_id,
+        "result": serialized[0],
+        "results": serialized,
+        "diagnostics": diagnostics,
     }
+
+
+@app.post("/trake/rerun-event")
+def trake_rerun_event(req: TrakeRerunRequest) -> dict[str, Any]:
+    locked = [(item.event_index, item.timestamp_ms) for item in req.locked_events]
+    if FIXTURE_MODE:
+        lower_values = [timestamp for index, timestamp in locked if index < req.event_index]
+        upper_values = [timestamp for index, timestamp in locked if index > req.event_index]
+        return {
+            "query_id": req.query_id or "trake-fixture-rerun",
+            "event_index": req.event_index,
+            "video_id": req.video_id,
+            "lower_bound_ms": max(lower_values) if lower_values else None,
+            "upper_bound_ms": min(upper_values) if upper_values else None,
+            "alternatives": [],
+            "provenance_mode": "fixture",
+        }
+    try:
+        services = _get_services()
+        candidates, lower, upper = rerun_trake_event(
+            req.query_text,
+            req.events,
+            req.event_index,
+            req.video_id,
+            services,
+            locked_events=locked,
+            query_id=req.query_id,
+            exclude_frame_id=req.exclude_frame_id,
+            limit=req.top_k,
+        )
+    except TV4ConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"TRAKE event rerun failed: {exc}") from exc
+    return {
+        "query_id": req.query_id or (candidates[0].query_id if candidates else "trake-rerun"),
+        "event_index": req.event_index,
+        "video_id": req.video_id,
+        "lower_bound_ms": lower,
+        "upper_bound_ms": upper,
+        "alternatives": [
+            {
+                "frame_id": candidate.frame_id,
+                "timestamp_ms": candidate.timestamp_ms,
+                "score": candidate.score,
+                "candidate": candidate.to_json(),
+            }
+            for candidate in candidates
+        ],
+    }
+
+
+@app.api_route("/videos/{video_id}/stream", methods=["GET", "HEAD"])
+def stream_original_video(video_id: str, request: Request):
+    """Read-only, registry-contained original-video transport for browsers."""
+    if FIXTURE_MODE:
+        raise HTTPException(status_code=503, detail="media unavailable in fixture mode")
+    try:
+        services = _get_services()
+    except TV4ConfigError as exc:
+        raise HTTPException(status_code=503, detail=f"original media unavailable: {exc}") from exc
+    path = _media_path_or_404(services, video_id)
+    size = path.stat().st_size
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(size)}
+    if request.method == "HEAD":
+        return Response(status_code=200, headers={**headers, "Content-Type": media_type})
+    range_header = request.headers.get("range")
+    if not range_header:
+        return FileResponse(path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
+    try:
+        start, end = _parse_byte_range(range_header, size)
+    except (TypeError, ValueError):
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}"})
+    return StreamingResponse(
+        _iter_file_range(path, start, end), status_code=206, media_type=media_type,
+        headers={**headers, "Content-Range": f"bytes {start}-{end}/{size}", "Content-Length": str(end - start + 1)},
+    )
+
+_media_cache: dict[str, dict[str, Any]] | None = None
+
+def _get_video_media_info(services: KisServices, video_id: str) -> dict[str, Any] | None:
+    global _media_cache
+    if _media_cache is None:
+        try:
+            rows = services.tv1.media()
+            _media_cache = {str(r.get("video_id")): r for r in rows if isinstance(r, dict) and "video_id" in r}
+        except Exception:
+            _media_cache = {}
+    return _media_cache.get(video_id)
+
+
+@app.get("/videos/{video_id}/meta")
+def video_metadata(video_id: str) -> dict[str, Any]:
+    """Return video metadata including FPS, duration, resolution from TV1."""
+    if FIXTURE_MODE:
+        return {"video_id": video_id, "fps": 25.0, "fps_nominal": 25.0, "fps_average": 25.0, "time_base": "1/12800"}
+    try:
+        services = _get_services()
+        match = _get_video_media_info(services, video_id)
+        if match:
+            fps = match.get("fps_nominal") or match.get("fps_average") or 25.0
+            return {
+                "video_id": video_id,
+                "fps": round(float(fps), 2) if isinstance(fps, (int, float)) else 25.0,
+                "fps_nominal": match.get("fps_nominal"),
+                "fps_average": match.get("fps_average"),
+                "duration_ms": match.get("duration_ms"),
+                "width_px": match.get("width_px"),
+                "height_px": match.get("height_px"),
+                "frame_count": match.get("frame_count"),
+                "codec": match.get("codec"),
+                "time_base": match.get("time_base"),
+            }
+    except Exception:
+        pass
+    return {"video_id": video_id, "fps": 25.0, "fps_nominal": 25.0, "fps_average": 25.0}
+
+
+def _derivative_frame_record(services: KisServices, video_id: str, frame_id: int) -> dict[str, Any]:
+    """Get a TV1-selected original-frame record from its owned metadata."""
+    try:
+        payload = services.tv1.frames(video_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="TV1 selected-frame metadata is unavailable") from exc
+    if not isinstance(payload, list):
+        raise HTTPException(status_code=502, detail="TV1 selected-frame metadata is malformed")
+    record = next((item for item in payload if isinstance(item, dict) and item.get("frame_id") == frame_id), None)
+    if record is None:
+        raise HTTPException(status_code=404, detail="selected frame is unavailable")
+    if record.get("video_id") != video_id or record.get("preprocess_run_id") != services.preprocess_run_id:
+        raise HTTPException(status_code=502, detail="TV1 selected-frame identity mismatch")
+    return record
+
+
+def _derivative_path(services: KisServices, record: dict[str, Any], field: str) -> Path:
+    if services.derivative_asset_root is None:
+        raise HTTPException(status_code=503, detail="derivative asset root is unconfigured")
+    raw_path = record.get(field)
+    if not isinstance(raw_path, str) or not raw_path:
+        raise HTTPException(status_code=404, detail="derivative image unavailable")
+    try:
+        return resolve_derivative_image_path(services.derivative_asset_root, raw_path, services.allowed_image_extensions)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="derivative image unavailable") from exc
+
+
+@app.get("/videos/{video_id}/frames/{frame_id}.jpg")
+def original_frame_image(video_id: str, frame_id: int):
+    """Display only a TV1-selected original frame via its keyframe derivative."""
+    if FIXTURE_MODE:
+        raise HTTPException(status_code=503, detail="media unavailable in fixture mode")
+    if frame_id < 0:
+        raise HTTPException(status_code=404, detail="original frame unavailable")
+    try:
+        services = _get_services()
+    except TV4ConfigError as exc:
+        raise HTTPException(status_code=503, detail=f"original media unavailable: {exc}") from exc
+    record = _derivative_frame_record(services, video_id, frame_id)
+    path = _derivative_path(services, record, "keyframe_path")
+    headers = {"X-Original-Frame-Id": str(frame_id), "X-Inspection-Derivative": "selected-keyframe"}
+    timestamp_ms = record.get("timestamp_ms")
+    if isinstance(timestamp_ms, int) and not isinstance(timestamp_ms, bool) and timestamp_ms >= 0:
+        headers["X-Timestamp-Ms"] = str(timestamp_ms)
+    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "image/jpeg", headers=headers)
+
+
+@app.get("/videos/{video_id}/resolve")
+def resolve_original_timestamp(video_id: str, timestamp_ms: int, mode: str = "nearest") -> dict[str, Any]:
+    """Fail closed: playback time alone is not a canonical original-frame ID."""
+    if FIXTURE_MODE:
+        raise HTTPException(status_code=503, detail="media unavailable in fixture mode")
+    if timestamp_ms < 0 or mode not in {"nearest", "before", "after"}:
+        raise HTTPException(status_code=422, detail="invalid timestamp resolution request")
+    try:
+        services = _get_services()
+    except TV4ConfigError as exc:
+        raise HTTPException(status_code=503, detail=f"original media unavailable: {exc}") from exc
+    _media_path_or_404(services, video_id)
+    return {
+        "video_id": video_id,
+        "requested_timestamp_ms": timestamp_ms,
+        "mode": mode,
+        "canonical_frame_id": None,
+        "canonical_timestamp_ms": None,
+        "inspection_only": True,
+        "submission_selectable": False,
+        "state": "canonical_frame_unresolved_from_arbitrary_playback_timestamp",
+    }
+
+
+def _derivative_image(video_id: str, frame_id: int, field: str, label: str):
+    if FIXTURE_MODE:
+        raise HTTPException(status_code=503, detail="media unavailable in fixture mode")
+    if frame_id < 0:
+        raise HTTPException(status_code=404, detail="derivative image unavailable")
+    try:
+        services = _get_services()
+    except TV4ConfigError as exc:
+        raise HTTPException(status_code=503, detail=f"original media unavailable: {exc}") from exc
+    record = _derivative_frame_record(services, video_id, frame_id)
+    path = _derivative_path(services, record, field)
+    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "image/jpeg", headers={"X-Original-Frame-Id": str(frame_id), "X-Inspection-Derivative": label})
+
+
+@app.get("/videos/{video_id}/keyframes/{frame_id}.jpg")
+def keyframe_image(video_id: str, frame_id: int):
+    return _derivative_image(video_id, frame_id, "keyframe_path", "keyframe")
+
+
+@app.get("/videos/{video_id}/thumbnails/{frame_id}.jpg")
+def thumbnail_image(video_id: str, frame_id: int):
+    return _derivative_image(video_id, frame_id, "thumbnail_path", "thumbnail")
+
+
+def _proven_exact_neighbors(req: ExactNeighborRequest, services: KisServices) -> tuple[dict[str, Any] | None, Path | None, tuple[int, ...], str | None]:
+    """Run the established WP09 proof flow; no caller may supply naked proof."""
+    if services.refine is None:
+        return None, None, (), "refiner_unavailable"
+    if services.original_media_root is None:
+        return None, None, (), "original_media_unconfigured"
+    try:
+        media_path = resolve_original_media_path(
+            services.original_media_root, req.video_id, services.media_registry,
+            services.preprocess_run_id, services.allowed_media_extensions,
+        )
+    except ValueError as exc:
+        return None, None, (), str(exc)
+    # Repeated UI stepping stays anchored to an already-certified selection.
+    # A returned neighbor is never silently promoted to a new anchor: the UI
+    # sends that same certified anchor plus its cumulative requested offset.
+    step_request = certified_step_request(
+        req.frame_id, req.timestamp_ms, req.offsets,
+        certified_anchor_frame_id=req.certified_anchor_frame_id,
+        certified_anchor_timestamp_ms=req.certified_anchor_timestamp_ms,
+        cumulative_offset=req.cumulative_offset,
+    )
+    anchor_frame_id = step_request.anchor_frame_id
+    anchor_timestamp_ms = step_request.anchor_timestamp_ms
+    effective_offsets = list(step_request.effective_offsets)
+    result = services.refine.neighbors(
+        {
+            "candidate": {"video_id": req.video_id, "frame_id": anchor_frame_id, "timestamp_ms": anchor_timestamp_ms},
+            "video_path": str(media_path),
+            "context": {
+                "preprocess_run_id": services.preprocess_run_id,
+                "media_record_ref": req.video_id,
+                "mapping_ref": f"tv1-frames/{req.video_id}",
+                "decoder_version": "pyav-tv4-adapter-2",
+                "model_version": "n/a",
+                "config_version": "default",
+            },
+            "offsets": effective_offsets,
+        }
+    )
+    authority = services.refine.exact_proof_authority
+    media = services.media_registry.get(req.video_id) if services.media_registry else None
+    if authority is None or media is None or result is None or not exact_neighbor_response_is_safe(
+        result, req.video_id, anchor_frame_id, effective_offsets, services.preprocess_run_id,
+        certification_id=authority.certification_id,
+        certification_report_sha256=authority.certification_report_sha256,
+        source_sha256=media.source_sha256,
+        time_base=media.time_base or None,
+    ):
+        return None, None, tuple(effective_offsets), "canonical_identity_unproven"
+    return result, media_path, tuple(effective_offsets), None
+
+
+def _decode_proven_frame_jpeg(media_path: Path, proof: dict[str, Any], *, av_module: Any | None = None) -> bytes:
+    """Render only one physically decoded frame equal to a WP09 proof record."""
+    try:
+        av = av_module
+        if av is None:
+            import av  # type: ignore[no-redef]
+        with av.open(str(media_path)) as container:
+            streams = container.streams.video
+            if not streams:
+                raise ValueError("video stream unavailable")
+            stream = streams[0]
+            if stream.time_base is None or str(stream.time_base) != proof["time_base"]:
+                raise ValueError("time-base mismatch")
+            container.seek(int(proof["pts"]), stream=stream, any_frame=False, backward=True)
+            matches = []
+            for decoded_count, frame in enumerate(container.decode(video=0), start=1):
+                if decoded_count > _EXACT_IMAGE_MAX_DECODED_FRAMES:
+                    raise ValueError("bounded decode exhausted")
+                if frame.pts is None:
+                    raise ValueError("decoded PTS unavailable")
+                timestamp_ms = int(float(frame.pts * stream.time_base) * 1000)
+                if frame.pts == proof["pts"] and str(stream.time_base) == proof["time_base"] and timestamp_ms == proof["timestamp_ms"]:
+                    matches.append(frame.to_image())
+                if timestamp_ms > proof["timestamp_ms"]:
+                    break
+            if len(matches) != 1:
+                raise ValueError("decoded frame does not uniquely match proof")
+            encoded = BytesIO()
+            matches[0].save(encoded, format="JPEG")
+            content = encoded.getvalue()
+            if not content:
+                raise ValueError("JPEG encoding returned no bytes")
+            return content
+    except Exception as exc:
+        raise ValueError("exact frame image unavailable") from exc
+
+
+def _decode_proven_frames_jpeg(
+    media_path: Path, proofs: list[dict[str, Any]], *, av_module: Any | None = None,
+) -> list[ProvenJpegFrame]:
+    """Decode a bounded proof set in one pass instead of reopening per frame."""
+    if not proofs or len(proofs) > 128:
+        return []
+    try:
+        av = av_module
+        if av is None:
+            import av  # type: ignore[no-redef]
+        time_bases = {str(proof["time_base"]) for proof in proofs}
+        if len(time_bases) != 1:
+            raise ValueError("mixed time bases")
+        wanted = {int(proof["pts"]): proof for proof in proofs}
+        decoded: dict[int, ProvenJpegFrame] = {}
+        with av.open(str(media_path)) as container:
+            streams = container.streams.video
+            if not streams:
+                raise ValueError("video stream unavailable")
+            stream = streams[0]
+            if stream.time_base is None or str(stream.time_base) not in time_bases:
+                raise ValueError("time-base mismatch")
+            first = min(wanted)
+            last_timestamp = max(int(proof["timestamp_ms"]) for proof in proofs)
+            container.seek(first, stream=stream, any_frame=False, backward=True)
+            for decoded_count, frame in enumerate(container.decode(video=0), start=1):
+                if decoded_count > _EXACT_IMAGE_MAX_DECODED_FRAMES:
+                    raise ValueError("bounded decode exhausted")
+                if frame.pts is None:
+                    continue
+                timestamp_ms = int(float(frame.pts * stream.time_base) * 1000)
+                proof = wanted.get(int(frame.pts))
+                if proof is not None and timestamp_ms == int(proof["timestamp_ms"]):
+                    encoded = BytesIO()
+                    frame.to_image().save(encoded, format="JPEG")
+                    decoded[int(frame.pts)] = ProvenJpegFrame(
+                        video_id=str(proof["video_id"]), frame_id=int(proof["frame_id"]),
+                        timestamp_ms=timestamp_ms, jpeg=encoded.getvalue(),
+                    )
+                if timestamp_ms > last_timestamp and len(decoded) == len(wanted):
+                    break
+        if len(decoded) != len(wanted):
+            raise ValueError("not every proof frame was decoded")
+        return [decoded[int(proof["pts"])] for proof in proofs]
+    except Exception:
+        return []
+
+
+_VISIBLE_NUMBER = re.compile(r"(?<![\w])[-+]?\d{1,6}(?:[.,]\d{1,4})?(?![\w])")
+
+
+def _relation_verify_answerable(
+    answerable: list[Any], description: str, question: str, plan: QaQueryPlan,
+    services: KisServices, verifier: OllamaVisualVerifier,
+) -> list[Any]:
+    if not plan.device or not answerable:
+        return answerable
+    output: list[Any] = []
+    for index, item in enumerate(answerable):
+        check = verifier.unavailable("disabled" if not verifier.enabled else "candidate_limit")
+        if verifier.enabled and index < verifier.max_qa_candidates:
+            frames = canonical_qa_frames(
+                item.evidence, services.derivative_asset_root,
+                services.allowed_image_extensions,
+                preprocess_run_id=services.preprocess_run_id,
+                limit=verifier.max_images,
+            )
+            check = verifier.verify_answer_source_relation(
+                description, question, plan.device, frames,
+            )
+        output.append(replace(
+            item,
+            candidate=replace(
+                item.candidate,
+                provenance={
+                    **item.candidate.provenance,
+                    "qa_relation_verification": check.to_json(),
+                },
+            ),
+        ))
+    return output
+
+
+def _has_numeric_ocr(evidence: Any) -> bool:
+    texts = [item.raw_text for item in evidence.ocr_evidence] + list(evidence.ocr_texts)
+    return any(_VISIBLE_NUMBER.fullmatch(text.strip()) for text in texts)
+
+
+def _dense_read_answerable(
+    answerable: list[Any], question: str, plan: QaQueryPlan,
+    services: KisServices, reader: DenseOcrReader,
+) -> list[Any]:
+    """Inspect only high-ranked, relation-gated numeric display candidates."""
+    if not plan.requires_dense_read or services.refine is None or not reader.enabled:
+        return answerable
+    output = list(answerable)
+    attempted = 0
+    for index, item in enumerate(output):
+        relation = item.candidate.provenance.get("qa_relation_verification")
+        relation_query_match = item.candidate.provenance.get("qa_relation_query_match") is True
+        visual_support_count = item.candidate.provenance.get("visual_video_support_count", 0)
+        required_support = item.candidate.provenance.get("qa_relation_required_support", 2)
+        consensus_match = (
+            isinstance(visual_support_count, int) and not isinstance(visual_support_count, bool)
+            and isinstance(required_support, int) and not isinstance(required_support, bool)
+            and visual_support_count >= required_support
+        )
+        relation_vlm_match = bool(
+            isinstance(relation, dict)
+            and relation.get("available") is True
+            and not relation.get("contradiction")
+            and float(relation.get("score") or 0.0) >= 0.55
+        )
+        if (
+            attempted >= 3 or not _has_numeric_ocr(item.evidence)
+            or not ((relation_query_match and consensus_match) or relation_vlm_match)
+        ):
+            continue
+        if isinstance(relation, dict) and (
+            relation.get("contradiction") is True
+            or relation.get("available") is True and float(relation.get("score") or 0.0) < 0.35
+        ):
+            continue
+        attempted += 1
+        following = sorted(
+            (
+                frame for frame in item.evidence.selected_frames
+                if frame.frame_id > item.candidate.frame_id
+            ),
+            key=lambda frame: (frame.frame_id, frame.timestamp_ms),
+        )
+        max_offset = reader.max_frames - 1
+        if following:
+            max_offset = min(max_offset, max(0, following[0].frame_id - item.candidate.frame_id - 1))
+        if max_offset < 1:
+            continue
+        offsets = list(range(0, max_offset + 1))
+        request = ExactNeighborRequest(
+            video_id=item.candidate.video_id,
+            frame_id=item.candidate.frame_id,
+            timestamp_ms=item.candidate.timestamp_ms,
+            offsets=offsets,
+        )
+        proof_result, media_path, effective_offsets, _ = _proven_exact_neighbors(request, services)
+        if proof_result is None or media_path is None:
+            continue
+        by_offset = {
+            int(step["offset"]): step.get("frame")
+            for step in proof_result.get("steps", ())
+            if isinstance(step, dict) and isinstance(step.get("offset"), int)
+        }
+        proofs = [by_offset[offset] for offset in effective_offsets if isinstance(by_offset.get(offset), dict)]
+        frames = _decode_proven_frames_jpeg(media_path, proofs)
+        dense = reader.read(frames, plan)
+        if not dense.available or dense.selected is None:
+            continue
+        selected = dense.selected
+        dense_evidence = OcrEvidence(
+            detection_id=f"dense-ocr:{item.candidate.video_id}:{selected.frame_id}:{selected.normalized_value}",
+            video_id=item.candidate.video_id,
+            frame_id=selected.frame_id,
+            timestamp_ms=selected.timestamp_ms,
+            raw_text=selected.normalized_value,
+            normalized_text=selected.normalized_value,
+            bbox_xyxy_norm=selected.bbox_xyxy_norm,
+            confidence=selected.confidence,
+            preprocess_run_id=services.preprocess_run_id,
+            model_name="craft-parseq-vn",
+            model_version="dense-live",
+            provenance={
+                "source": "wp09_certified_dense_decode",
+                "support_frame_ids": list(dense.support_frame_ids),
+                "temporal_rule": plan.temporal_rule,
+                "device_relation": plan.device,
+            },
+        )
+        exact_frame = CanonicalFrameReference(
+            video_id=item.candidate.video_id,
+            frame_id=selected.frame_id,
+            timestamp_ms=selected.timestamp_ms,
+            preprocess_run_id=services.preprocess_run_id,
+            provenance={
+                "source": "wp09_certified_dense_decode",
+                "submission_selectable": True,
+            },
+        )
+        evidence = replace(
+            item.evidence,
+            frame_id=selected.frame_id,
+            timestamp_ms=selected.timestamp_ms,
+            keyframe_path=None,
+            selected_frames=tuple((*item.evidence.selected_frames, exact_frame)),
+            ocr_evidence=tuple((dense_evidence, *item.evidence.ocr_evidence)),
+            ocr_texts=tuple((selected.normalized_value, *(
+                value for value in item.evidence.ocr_texts
+                if value != selected.normalized_value
+            ))),
+            availability={**item.evidence.availability, "dense_ocr": "available"},
+            provenance={
+                **item.evidence.provenance,
+                "dense_ocr": dense.to_json(),
+                "dense_ocr_relation_verification": relation,
+                "dense_ocr_relation_query_match": relation_query_match,
+                "dense_ocr_visual_consensus": consensus_match,
+            },
+        )
+        candidate = replace(
+            item.candidate,
+            frame_id=selected.frame_id,
+            timestamp_ms=selected.timestamp_ms,
+            provenance={
+                **item.candidate.provenance,
+                "dense_ocr": dense.to_json(),
+                "coarse_frame_id": item.candidate.frame_id,
+                "coarse_timestamp_ms": item.candidate.timestamp_ms,
+            },
+        )
+        output[index] = replace(item, candidate=candidate, evidence=evidence)
+    return output
+
+
+@app.post("/exact-frame/neighbors")
+def exact_frame_neighbors(req: ExactNeighborRequest) -> dict[str, Any]:
+    """Expose only WP09-proven original neighbors for inspection/selection."""
+    if FIXTURE_MODE:
+        return fixtures.EXACT_NEIGHBOR_RESPONSE
+    try:
+        services = _get_services()
+    except TV4ConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    result, _, _, reason = _proven_exact_neighbors(req, services)
+    if result is not None and any(
+        isinstance(step, dict) and isinstance(step.get("frame"), dict)
+        for step in result.get("steps", ())
+    ):
+        return result
+    degraded_reason = reason
+    if result is not None:
+        degraded_reason = result.get("degraded_reason") or next(
+            (
+                step.get("degraded_reason") for step in result.get("steps", ())
+                if isinstance(step, dict) and isinstance(step.get("degraded_reason"), str)
+            ),
+            None,
+        )
+    return _selected_keyframe_preview_neighbors(
+        req, services, degraded_reason or "canonical_identity_unproven",
+    )
+
+
+@app.post("/exact-frame/image")
+def exact_frame_image(req: ExactNeighborRequest):
+    """Return a JPEG only after the existing WP09 proof is revalidated here."""
+    if FIXTURE_MODE:
+        raise HTTPException(status_code=503, detail="exact frame image unavailable in fixture mode")
+    if len(req.offsets) != 1:
+        raise HTTPException(status_code=422, detail="exact frame image requires exactly one signed offset")
+    try:
+        services = _get_services()
+    except TV4ConfigError as exc:
+        raise HTTPException(status_code=503, detail=f"exact frame image unavailable: {exc}") from exc
+    result, media_path, effective_offsets, reason = _proven_exact_neighbors(req, services)
+    if result is None or media_path is None:
+        raise HTTPException(status_code=409, detail=f"exact frame image unavailable: {reason or 'canonical_identity_unproven'}")
+    step = next((item for item in result["steps"] if item.get("offset") == effective_offsets[0]), None)
+    proof = step.get("frame") if isinstance(step, dict) else None
+    if not isinstance(proof, dict):
+        raise HTTPException(status_code=409, detail="exact frame image unavailable: proven step is unavailable")
+    try:
+        content = _decode_proven_frame_jpeg(media_path, proof)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="exact frame image unavailable") from exc
+    headers = {
+        "X-Original-Video-Id": str(proof["video_id"]),
+        "X-Original-Frame-Id": str(proof["frame_id"]),
+        "X-PTS": str(proof["pts"]),
+        "X-Time-Base": str(proof["time_base"]),
+        "X-Timestamp-Ms": str(proof["timestamp_ms"]),
+        "X-Preprocess-Run-Id": str(proof["preprocess_run_id"]),
+        "X-Exact-Certification-Id": str(proof["certification_id"]),
+        "X-Exact-Certification-Report-Sha256": str(proof["certification_report_sha256"]),
+        "X-Exact-Source-Sha256": str(proof["source_sha256"]),
+        "X-Submission-Selectable": "true",
+    }
+    return Response(content=content, media_type="image/jpeg", headers=headers)
+
+
+def _exact_unavailable(req: ExactNeighborRequest, preprocess_run_id: str, reason: str) -> dict[str, Any]:
+    return {
+        "video_id": req.video_id,
+        "anchor_frame_id": req.frame_id,
+        "degraded_reason": reason,
+        "preprocess_run_id": preprocess_run_id,
+        "steps": [{"offset": offset, "frame": None, "degraded_reason": reason} for offset in req.offsets],
+    }
+
+
+def _selected_keyframe_preview_neighbors(
+    req: ExactNeighborRequest, services: KisServices, reason: str,
+) -> dict[str, Any]:
+    """Return TV1-owned selected keyframes when exact WP09 proof is unavailable.
+
+    These records are explicitly preview-only: they live in ``preview_frame``
+    rather than ``frame`` and can never pass through the exact-image or
+    submission-selectable path. This keeps the temporal strip useful while a
+    new preprocess run is waiting for its run-specific WP09 certification.
+    """
+    step_request = certified_step_request(
+        req.frame_id, req.timestamp_ms, req.offsets,
+        certified_anchor_frame_id=req.certified_anchor_frame_id,
+        certified_anchor_timestamp_ms=req.certified_anchor_timestamp_ms,
+        cumulative_offset=req.cumulative_offset,
+    )
+    effective_offsets = tuple(step_request.effective_offsets)
+    try:
+        payload = services.tv1.frames(req.video_id)
+    except Exception:
+        payload = []
+    frames = sorted(
+        (
+            item for item in payload
+            if isinstance(item, dict)
+            and item.get("video_id") == req.video_id
+            and item.get("preprocess_run_id") == services.preprocess_run_id
+            and isinstance(item.get("frame_id"), int) and not isinstance(item.get("frame_id"), bool)
+            and isinstance(item.get("timestamp_ms"), int) and not isinstance(item.get("timestamp_ms"), bool)
+        ),
+        key=lambda item: (int(item["timestamp_ms"]), int(item["frame_id"])),
+    ) if isinstance(payload, list) else []
+    if not frames:
+        return {
+            "video_id": req.video_id,
+            "anchor_frame_id": step_request.anchor_frame_id,
+            "degraded_reason": reason,
+            "preprocess_run_id": services.preprocess_run_id,
+            "provenance_mode": "unavailable",
+            "steps": [
+                {"offset": offset, "frame": None, "preview_frame": None, "degraded_reason": reason}
+                for offset in effective_offsets
+            ],
+        }
+
+    anchor_index = next(
+        (index for index, item in enumerate(frames) if item["frame_id"] == step_request.anchor_frame_id),
+        None,
+    )
+    if anchor_index is None:
+        anchor_index = min(
+            range(len(frames)),
+            key=lambda index: (
+                abs(int(frames[index]["timestamp_ms"]) - step_request.anchor_timestamp_ms),
+                int(frames[index]["timestamp_ms"]),
+                int(frames[index]["frame_id"]),
+            ),
+        )
+
+    steps: list[dict[str, Any]] = []
+    for offset in effective_offsets:
+        target_index = anchor_index + offset
+        if target_index < 0 or target_index >= len(frames):
+            steps.append({
+                "offset": offset, "frame": None, "preview_frame": None,
+                "degraded_reason": "selected_keyframe_boundary",
+            })
+            continue
+        record = frames[target_index]
+        steps.append({
+            "offset": offset,
+            "frame": None,
+            "preview_frame": {
+                "video_id": req.video_id,
+                "frame_id": int(record["frame_id"]),
+                "timestamp_ms": int(record["timestamp_ms"]),
+                "preprocess_run_id": services.preprocess_run_id,
+                "submission_selectable": False,
+                "identity_source": "tv1_selected_keyframe_preview",
+            },
+            "degraded_reason": reason,
+        })
+    return {
+        "video_id": req.video_id,
+        "anchor_frame_id": int(frames[anchor_index]["frame_id"]),
+        "degraded_reason": reason,
+        "preprocess_run_id": services.preprocess_run_id,
+        "provenance_mode": "tv1_selected_keyframe_preview",
+        "steps": steps,
+    }
+
+
+_fixture_feedback_adapter: Any = None
+
+
+def _get_feedback_adapter():
+    global _fixture_feedback_adapter
+    if FIXTURE_MODE:
+        if _fixture_feedback_adapter is None:
+            from .adapters.wp08_adapter import Wp08FeedbackAdapter
+            _fixture_feedback_adapter = Wp08FeedbackAdapter(fixture_mode=True)
+        return _fixture_feedback_adapter
+    try:
+        services = _get_services()
+    except TV4ConfigError as exc:
+        raise HTTPException(status_code=503, detail=f"feedback unavailable: {exc}") from exc
+    if services.feedback is None:
+        raise HTTPException(status_code=503, detail="WP08 feedback service is disabled or unconfigured")
+    return services.feedback
+
+
+def _handle_feedback_call(fn: Any) -> dict[str, Any]:
+    from wp08.contracts import (
+        FeedbackValidationError,
+        RevisionConflict,
+        SessionExpired,
+        ModelRankingFailed,
+    )
+    try:
+        return fn()
+    except FeedbackValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SessionExpired as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ModelRankingFailed as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"feedback service error: {exc}") from exc
+
+
+@app.post("/feedback/start")
+def feedback_start(req: FeedbackStartApiRequest) -> dict[str, Any]:
+    adapter = _get_feedback_adapter()
+    return _handle_feedback_call(lambda: adapter.start_session(req.session_id, req.original_query))
+
+
+@app.post("/feedback/refine")
+def feedback_refine(req: FeedbackRefineApiRequest) -> dict[str, Any]:
+    adapter = _get_feedback_adapter()
+    return _handle_feedback_call(
+        lambda: adapter.refine(
+            session_id=req.session_id,
+            video_id=req.video_id,
+            frame_id=req.frame_id,
+            feedback_text=req.feedback_text,
+            expected_revision=req.expected_revision,
+            source_candidate_frame_id=req.source_candidate_frame_id,
+        )
+    )
+
+
+@app.post("/feedback/undo")
+def feedback_undo(req: FeedbackUndoApiRequest) -> dict[str, Any]:
+    adapter = _get_feedback_adapter()
+    return _handle_feedback_call(lambda: adapter.undo(req.session_id, req.expected_revision))
+
+
+@app.post("/feedback/reset")
+def feedback_reset(req: FeedbackResetApiRequest) -> dict[str, Any]:
+    adapter = _get_feedback_adapter()
+    return _handle_feedback_call(lambda: adapter.reset(req.session_id, req.expected_revision))
+
+
+@app.get("/feedback/session/{session_id}")
+def feedback_session(session_id: str) -> dict[str, Any]:
+    if not session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id must be non-empty")
+    adapter = _get_feedback_adapter()
+    return _handle_feedback_call(lambda: adapter.get_session(session_id))

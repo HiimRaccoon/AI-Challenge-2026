@@ -1,1 +1,0 @@
-{"case_id":"object-spatial-template","image_fixture":null,"query":"ô tô bên phải","expected_labels":["car"],"expected_region":"right","status":"PENDING_REAL_IMAGE_FIXTURE"}

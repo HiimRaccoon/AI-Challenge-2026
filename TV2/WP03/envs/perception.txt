@@ -1,3 +1,0 @@
-# Install the official Perception Encoder source at this immutable GitHub commit.
-# Model weights are pinned separately by the Hugging Face revision in configs/*.yaml.
-git+https://github.com/facebookresearch/perception_models.git@3e352cca660658d4b5c90f42a7808b11469e4c66

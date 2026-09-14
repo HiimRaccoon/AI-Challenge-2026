@@ -2,29 +2,79 @@
 # Paths below assume tv1/, tv2/, tv1tv3/, tv4/ all sit as SIBLING folders,
 # as produced by extracting each team member's zip into the same parent dir.
 
-preprocess_run_id: run_v1_batch1
+preprocess_run_id: run_v3_ultradense
 
 tv1:
   base_url: "http://127.0.0.1:8000"
+  original_media_root: "../../tv1/data/raw"
+  media_registry_path: "../../tv1/data/runs/run_v3_ultradense/manifest/corpus_manifest.json"
+  allowed_media_extensions: [".mp4"]
+  derivative_asset_root: "../../tv1/data/runs/run_v3_ultradense"
+  allowed_image_extensions: [".jpg", ".jpeg", ".png"]
 
 tv3:
   base_url: "http://127.0.0.1:8100"
 
 tv2_visual:
   enabled: true
-  python_executable: "../../tv2_1/WP03/.venvs/coordinator/Scripts/python.exe"
-  wp03_cwd: "../../tv2_1/WP03"
-  artifact_root: "../../tv2_1/WP03/artifacts/smoke-run-1"
-  runtime_root: "../../tv2_1/WP03"
-  runtime_profile: "../../tv2_1/WP03/configs/runtime.windows.yaml"
+  python_executable: "F:/WORK/final_aic/tv2/WP03/.venvs/coordinator/Scripts/python.exe"
+  wp03_cwd: "F:/WORK/final_aic/tv2/WP03"
+  # artifact_root: "F:/WORK/final_aic/tv2/WP03/artifacts/full-run-v3-ultradense"
+  artifact_root: "F:/WORK/final_aic/tv2/WP03/artifacts/full-run-v3-ultradense-hnsw"
+  runtime_root: "F:/WORK/final_aic/tv2/WP03"
+  runtime_profile: "F:/WORK/final_aic/tv2/WP03/configs/runtime.windows.yaml"
   top_k: 100
-  candidate_k_per_model: 200
+  # Keep enough depth for the observed hard positives (q26 appears below
+  # rank 200 in BEiT) without paying to map/fuse 1,000 hits per model/query.
+  candidate_k_per_model: 300
+  # Two complementary text encoders keep online retrieval inside the latency
+  # budget. The full four-model artifact set remains available for ablation.
+  online_models: ["bge_vl", "metaclip2"]
+  # Ordered camera/action descriptions use the complementary online pair.
+  # Unordered multi-object slides use BEiT-3 alone: it contains the observed
+  # hard q26 positive while staying below the 34s request budget by avoiding a
+  # second sequential GPU worker launch.
+  temporal_online_models: ["bge_vl", "metaclip2"]
+  multi_moment_online_models: ["beit3"]
+  # Keep the CPU FAISS/mapping coordinator alive across API calls. GPU model
+  # workers remain sequential, preventing concurrent 12 GB VRAM overflow.
+  persistent: true
+  # Probe every model used by an online route in the background at startup.
+  # WP03 model workers are one-shot processes, so this is a readiness and OS
+  # cache warm-up rather than a claim that GPU weights remain resident.
+  warmup_enabled: true
+  warmup_timeout_seconds: 180
+  warmup_query: "a person in an educational lecture slide"
+  warmup_models: ["bge_vl", "metaclip2", "beit3"]
+  # This is a total queue + execution budget inside the visual client. Query
+  # planning uses at most one bounded translation call before this stage.
+  timeout_seconds: 34
 
 tv2_refine:
+  # WP09 is the frame-identity authority for bounded dense QA inspection.
+  # Failures remain degraded/optional and never invalidate retrieval results.
+  # Disabled until WP09 publishes an exact-frame certification for run_v3_ultradense.
   enabled: false
-  python_executable: "../../tv2_1/WP09/.venv/Scripts/python.exe"
-  wp09_cwd: "../../tv2_1/WP09"
-  config_path: "../../tv2_1/WP09/configs/default.yaml"
+  python_executable: "F:/WORK/final_aic/tv2/WP09/.venv/Scripts/python.exe"
+  wp09_cwd: "F:/WORK/final_aic/tv2/WP09"
+  config_path: "F:/WORK/final_aic/tv2/WP09/configs/default.yaml"
+  exact_certification_path: "F:/WORK/final_aic/tv2/WP09/configs/certifications/run_v1_batch1.json"
+
+dense_qa:
+  # Keep disabled for the integrated stack: the resident OCR model server and
+  # TV2 visual workers can otherwise exceed the 12 GB GPU budget.
+  enabled: false
+  ocr_base_url: "http://127.0.0.1:8765"
+  max_frames: 64
+  max_batch_frames: 4
+  min_confidence: 0.45
+  min_stable_frames: 2
+  timeout_seconds: 120
+
+# Not yet enabled: needs tv2/WP08 wired up and a writable sqlite path.
+tv2_feedback:
+  enabled: false
+  sqlite_path: "data/feedback_sessions.db"
 
 fusion:
   rrf_k: 60

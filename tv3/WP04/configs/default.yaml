@@ -1,0 +1,50 @@
+schema_version: "1.0.0"
+normalization_version: "vi-unicode-lower-fold-v1"
+modalities:
+  ocr:
+    enabled: true
+    model:
+      name: craft-parseq-vn
+      version: local-http-batch-v1
+      factory: "wp04.runtime_adapters:build_ocr_adapter"
+    settings:
+      command_env: WP04_OCR_COMMAND
+      server_url: http://127.0.0.1:8765
+    confidence_threshold: 0.35
+    batch_size: 8
+    # Keep the first/last frame of every TV1 shot plus periodic support frames.
+    # WP03 continues to index every frame for visual retrieval.
+    sample_interval_ms: 1000
+    device: cuda
+  asr:
+    enabled: true
+    model:
+      name: chunkformer-ctc-large-vie
+      version: local-http-batch-v1
+      factory: "wp04.runtime_adapters:build_asr_adapter"
+    settings:
+      command_env: WP04_CHUNKFORMER_COMMAND
+      server_url: http://127.0.0.1:8765
+    vad:
+      name: silero-vad
+      version: local-command-v1
+      threshold: 0.5
+      min_speech_ms: 250
+      max_segment_ms: 30000
+      overlap_ms: 500
+    device: cuda
+  object:
+    enabled: true
+    model:
+      name: rf-detr
+      version: local-http-batch-v1
+      factory: "wp04.runtime_adapters:build_object_adapter"
+    settings:
+      command_env: WP04_RFDETR_COMMAND
+      server_url: http://127.0.0.1:8765
+    confidence_threshold: 0.25
+    batch_size: 8
+    sample_interval_ms: 1000
+    device: cuda
+  metadata:
+    enabled: true

@@ -11,6 +11,9 @@ dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
+# Required only for the optional HTTP API consumed by TV5.  The handoff CLI
+# itself still needs only PyYAML and its upstream services.
+api = ["fastapi>=0.110", "uvicorn>=0.27"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

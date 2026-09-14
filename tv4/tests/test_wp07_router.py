@@ -1,4 +1,5 @@
 from tv4.wp07_router import route_kis, route_qa, route_trake, split_trake_events
+from tv4.kis_pipeline import _question_prefers_asr
 
 
 def test_route_kis_always_includes_visual():
@@ -16,6 +17,12 @@ def test_route_qa_carries_question():
     decision = route_qa("video lễ trao giải", "có bao nhiêu người lên sân khấu?")
     assert decision.request.question == "có bao nhiêu người lên sân khấu?"
     assert decision.request.task == "VQA"
+    assert decision.branches == ("visual", "ocr", "asr", "object", "metadata")
+
+
+def test_location_questions_prefer_asr_candidates_for_vqa():
+    assert _question_prefers_asr("cháy rừng xảy ra ở đâu?") is True
+    assert _question_prefers_asr("what color is the car?") is False
 
 
 def test_split_trake_events_numbered():

@@ -1,2 +1,0 @@
-{"case_id":"phrase-boundary-001","query":"kinh","document":"kinhte","exact_phrase":false}
-{"case_id":"no-diacritic-001","query":"cong hoa viet nam","document":"Cộng hòa Việt Nam","should_match":true}

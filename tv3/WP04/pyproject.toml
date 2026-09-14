@@ -1,0 +1,17 @@
+[project]
+name = "aic2026-wp04"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["pyarrow>=14", "PyYAML>=6"]
+
+[project.optional-dependencies]
+# The artifact CLI remains lightweight; install this extra only when exposing
+# wp04.api for TV4 over HTTP.
+api = ["fastapi>=0.110", "uvicorn>=0.27"]
+
+[project.scripts]
+wp04 = "wp04.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

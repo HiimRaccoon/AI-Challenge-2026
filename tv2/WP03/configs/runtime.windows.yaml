@@ -1,0 +1,21 @@
+workers:
+  beit3:
+    command: [".venvs/beit3/Scripts/python.exe", "-m", "wp03.workers.beit3"]
+    env:
+      WP03_BEIT3_SOURCE_DIR: "third_party/unilm/beit3"
+      WP03_BEIT3_CHECKPOINT: "model-cache/beit3/beit3_base_patch16_384_coco_retrieval.pth"
+      WP03_BEIT3_LOCK_PATH: "model-locks/beit3.json"
+      WP03_BEIT3_SENTENCEPIECE: "model-cache/beit3/beit3.spm"
+      WP03_SOURCE_ROOT: "src"
+  bge_vl:
+    command: [".venvs/bge_vl/Scripts/python.exe", "-m", "wp03.workers.bge_vl"]
+    env:
+      WP03_SOURCE_ROOT: "src"
+  metaclip2:
+    command: [".venvs/metaclip2/Scripts/python.exe", "-m", "wp03.workers.metaclip2"]
+    env:
+      WP03_SOURCE_ROOT: "src"
+  perception:
+    command: [".venvs/perception/Scripts/python.exe", "-m", "wp03.workers.perception"]
+    env:
+      WP03_SOURCE_ROOT: "src"

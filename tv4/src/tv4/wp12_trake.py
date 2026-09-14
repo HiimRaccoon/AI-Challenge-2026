@@ -8,7 +8,7 @@ vs chain vs DP vs beam" requirement:
                         repair any timestamp inversions greedily. Fast,
                         used as the always-available baseline.
   * `align_dp`        — exact DP: maximize sum(event scores) subject to
-                        frame_1.ts <= frame_2.ts <= ... <= frame_n.ts inside
+                        frame_1.ts < frame_2.ts < ... < frame_n.ts inside
                         the chosen video. This is the "chain/DP" strategy
                         and is what TV4 submits unless it degrades (an event
                         has zero candidates).
@@ -46,18 +46,19 @@ def align_greedy(pools: list[EventPool]) -> list[SearchCandidate] | None:
     if any(not p.candidates for p in pools):
         return None
     chosen = [p.candidates[0] for p in pools]
-    # Repair monotonicity left-to-right: if event i's ts < event i-1's ts,
-    # swap in the highest-scoring candidate for event i that is still >=.
+    # Repair ordering left-to-right: each later event needs a later frame.
     for i in range(1, len(chosen)):
-        if chosen[i].timestamp_ms < chosen[i - 1].timestamp_ms:
-            better = next((c for c in pools[i].candidates if c.timestamp_ms >= chosen[i - 1].timestamp_ms), None)
+        if chosen[i].timestamp_ms <= chosen[i - 1].timestamp_ms:
+            better = next((c for c in pools[i].candidates if c.timestamp_ms > chosen[i - 1].timestamp_ms), None)
             if better is not None:
                 chosen[i] = better
+            else:
+                return None
     return chosen
 
 
 def align_dp(pools: list[EventPool], max_candidates_per_event: int = 20) -> list[SearchCandidate] | None:
-    """Exact DP maximizing total score subject to non-decreasing timestamps.
+    """Exact DP maximizing total score subject to strictly increasing timestamps.
 
     O(sum |pool_i| * |pool_{i-1}|); pools are pre-truncated to the top
     `max_candidates_per_event` (already score-sorted) to keep this bounded
@@ -76,7 +77,7 @@ def align_dp(pools: list[EventPool], max_candidates_per_event: int = 20) -> list
         for j, c in enumerate(trimmed[i]):
             best_score, best_prev = float("-inf"), -1
             for k, prev_c in enumerate(trimmed[i - 1]):
-                if prev_c.timestamp_ms > c.timestamp_ms:
+                if prev_c.timestamp_ms >= c.timestamp_ms:
                     continue
                 prev_score, _ = dp[i - 1][k]
                 if prev_score > best_score:
@@ -111,7 +112,16 @@ def align_trake(pools: list[EventPool], strategy: str = "dp") -> list[SearchCand
     return result
 
 
-def to_hypothesis(query_id: str, video_id: str, aligned: list[SearchCandidate], preprocess_run_id: str) -> TrakeHypothesis:
+def to_hypothesis(
+    query_id: str,
+    video_id: str,
+    aligned: list[SearchCandidate],
+    preprocess_run_id: str,
+    *,
+    rank: int = 1,
+    event_alternatives: tuple[tuple[SearchCandidate, ...], ...] = (),
+    verification: dict[str, object] | None = None,
+) -> TrakeHypothesis:
     scores = [c.score or 0.0 for c in aligned]
     return TrakeHypothesis(
         query_id=query_id,
@@ -120,4 +130,9 @@ def to_hypothesis(query_id: str, video_id: str, aligned: list[SearchCandidate], 
         event_scores=tuple(scores),
         aggregate_score=sum(scores),
         preprocess_run_id=preprocess_run_id,
+        timestamps_ms=tuple(c.timestamp_ms for c in aligned),
+        candidates=tuple(aligned),
+        rank=rank,
+        event_alternatives=event_alternatives,
+        verification=verification or {},
     )

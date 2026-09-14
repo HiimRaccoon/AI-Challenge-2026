@@ -1,0 +1,40 @@
+# All paths are relative to this file's directory, not the user's drive.
+preprocess_run_id: run_handoff_v1
+tv1:
+  base_url: "http://127.0.0.1:8000"
+  original_media_root: "../../tv1/data/raw"
+  media_registry_path: "../../tv1/data/runs/run_handoff_v1/manifest/corpus_manifest.json"
+  allowed_media_extensions: [".mp4"]
+  derivative_asset_root: "../../tv1/data/runs/run_handoff_v1"
+  allowed_image_extensions: [".jpg", ".jpeg", ".png"]
+tv3:
+  base_url: "http://127.0.0.1:8100"
+tv2_visual:
+  enabled: true
+  python_executable: "../../tv2/WP03/.venvs/coordinator/Scripts/python.exe"
+  wp03_cwd: "../../tv2/WP03"
+  artifact_root: "../../tv2/WP03/artifacts/handoff-metaclip2"
+  runtime_root: "../../tv2/WP03"
+  runtime_profile: "../../tv2/WP03/configs/runtime.windows.yaml"
+  top_k: 100
+  candidate_k_per_model: 200
+  online_models: ["metaclip2"]
+  temporal_online_models: ["metaclip2"]
+  multi_moment_online_models: ["metaclip2"]
+  persistent: true
+  warmup_enabled: true
+  warmup_models: ["metaclip2"]
+  warmup_query: "a person speaking in a room"
+  warmup_timeout_seconds: 180
+  timeout_seconds: 120
+tv2_refine:
+  enabled: false
+dense_qa:
+  enabled: false
+tv2_feedback:
+  enabled: false
+fusion:
+  rrf_k: 60
+  dedup_window_ms: 1000
+  top_k: 100
+output_dir: "outputs"

@@ -1,0 +1,95 @@
+{
+  "task": "T015",
+  "name": "Rich evidence / VQA contract characterization",
+  "authority": [
+    "references/competition/Thong_Tin_Vong_So_Tuyen_AIC_2026.pdf (VQA task semantics)",
+    "references/architecture/AIC2026_Pipeline_Final.md §3, WP04, WP09 and WP11",
+    "END_TO_END_GUIDE.md (current TV4 /vqa/answer transport)",
+    "specs/001-contest-ready-wp13/spec.md FR-009..016, FR-061, FR-064..066",
+    "specs/001-contest-ready-wp13/contracts/wp13-boundaries.md"
+  ],
+  "source_locations": {
+    "wp04_runtime_source": "D:/aic226/tv1tv3/TV1_TV3_WP04/src/aic2026",
+    "wp04_contracts": "D:/aic226/tv1tv3/TV1_TV3_WP04/src/aic2026/contracts.py",
+    "wp04_evidence_api": "D:/aic226/tv1tv3/TV1_TV3_WP04/src/aic2026/api.py",
+    "tv4_tracked_source": "D:/aic226/tv5/tv4/src/tv4",
+    "tv4_runtime_source": "D:/aic226/tv4/src/tv4",
+    "tv4_vqa": "src/tv4/wp11_vqa.py",
+    "tv4_http": "src/tv4/api.py"
+  },
+  "current_tv4_contract": {
+    "request": {
+      "path": "POST /vqa/answer",
+      "required": ["query_text", "question"],
+      "optional": ["query_id", "top_k", "top_k_answers"]
+    },
+    "response": {
+      "top_level": ["query_id", "results"],
+      "result": ["rank", "video_id", "frame_id", "timestamp_ms", "confidence", "answer", "verified", "manual_review", "evidence"],
+      "evidence": ["query_id", "video_id", "frame_id", "timestamp_ms", "keyframe_path", "ocr_texts", "asr_texts", "object_labels", "neighbor_frame_ids", "provenance"]
+    },
+    "behavior": {
+      "retrieval": "run_kis_query(query_text) retrieves candidates",
+      "evidence_probe": "build_evidence_pack sends SearchRequest(query_text=None, question=None) to OCR, ASR and Object",
+      "verifier": "RuleBasedFallbackEngine.verify returns bool(answer)",
+      "retry": "no retry state or controlled retry implementation",
+      "approval": "no operator-approval state; all backend output is only a current TV4 result"
+    }
+  },
+  "wp04_source_contract": {
+    "ocr": ["OCRDetection.raw_text", "normalized_text", "bbox_xyxy_norm", "polygon_norm?", "confidence?", "crop_evidence_path?", "model_name", "model_version", "preprocess_run_id", "video_id", "frame_id", "timestamp_ms"],
+    "asr": ["ASRSegment.text", "normalized_text", "start_ms", "end_ms", "words", "confidence?", "model_name", "model_version", "preprocess_run_id", "video_id"],
+    "object": ["ObjectDetection.label", "canonical_label?", "bbox_xyxy_norm", "confidence?", "source_keyframe_path?", "model_name", "model_version", "preprocess_run_id", "video_id", "frame_id", "timestamp_ms"],
+    "metadata": ["MetadataRecord source/value fields", "window_start_ms?", "window_end_ms?", "confidence?", "model_name?", "model_version?", "source_record_sha256?", "preprocess_run_id", "video_id"],
+    "catalogue_routes": ["/ocr/detections", "/asr/segments", "/asr/{segment_id}/context", "/objects/detections", "/metadata/records"],
+    "identity": "WP04 copies TV1 original frame and PTS/time-base derived timestamp identity; ASR segments preserve timing and do not invent frame IDs."
+  },
+  "required_tv4_target_contract": {
+    "request_propagation": "The original retrieval query_text and VQA question remain distinct and reach every evidence/reasoning/verifier consumer that uses them.",
+    "evidence_pack": {
+      "required": ["query_id", "query_text", "question", "candidate canonical video_id/frame_id/timestamp_ms", "selected canonical frame references", "ocr evidence records", "asr evidence records", "object evidence records", "metadata evidence records", "branch provenance", "preprocess/model/run/config provenance"],
+      "forbidden": ["anonymous flattened evidence strings as the sole representation", "locally calculated supporting frame identities", "guessed ASR frame IDs"]
+    },
+    "proposal_state": ["proposal", "confidence when actually supplied", "verifier status", "retry_count", "manual_required or abstained/degraded status", "approved=false at backend boundary"],
+    "safety": ["empty or malformed evidence fails closed/manual", "non-empty answer alone cannot verify", "at most one controlled retry", "VLM/verifier/WP04 unavailability is explicit scoped degradation/manual"],
+    "canonical_identity": ["video_id", "original frame_id", "timestamp_ms", "upstream-selected multi-frame references only"]
+  },
+  "classification_at_t015": {
+    "wp04_producer_source_and_contracts": "SUPPORTED",
+    "wp04_corrected_modality_artifacts": "HANDOVER PENDING",
+    "tv4_rich_evidence_mapping": "CODE GAP",
+    "tv4_question_query_propagation": "CODE GAP",
+    "tv4_empty_evidence_abstention": "CODE GAP",
+    "tv4_verifier_boundary": "CODE GAP",
+    "tv4_controlled_retry": "CODE GAP",
+    "vlm_execution": "SCOPED DEGRADATION",
+    "canonical_frame_identity_source": "SUPPORTED"
+  },
+  "t016_repair_status": {
+    "tv4_rich_evidence_mapping": "SUPPORTED",
+    "tv4_question_query_propagation": "SUPPORTED",
+    "tv4_empty_evidence_abstention": "SUPPORTED",
+    "tv4_verifier_boundary": "SUPPORTED",
+    "tv4_controlled_retry": "SUPPORTED",
+    "vlm_execution": "SCOPED DEGRADATION"
+  },
+  "known_current_gaps_at_t015": [
+    "TV4 drops both query_text and question while probing WP04 evidence.",
+    "TV4 collapses OCR, ASR and Object candidates to strings/labels and does not call catalogue detail/context routes.",
+    "TV4 does not retrieve Metadata for VQA evidence.",
+    "EvidencePack neighbor_frame_ids are selected from TV1 frame records but carry no per-frame proof/provenance bundle.",
+    "Rule fallback verifies arbitrary non-empty answer text.",
+    "No bounded retry, explicit abstain/degraded state, or advisory-vs-approval boundary exists in the VQA result contract."
+  ],
+  "error_degraded_matrix": {
+    "malformed_request": {"current": "FastAPI validation for request scalar fields", "target": "422 or explicit fail-closed manual/degraded result; no fabricated answer"},
+    "unknown_canonical_candidate": {"current": "no VQA-specific canonical-candidate validation", "target": "manual/degraded result with no verified proposal"},
+    "empty_evidence": {"current": "engine may return verified non-empty answer", "target": "abstain/manual required; never confident/verified"},
+    "partial_evidence": {"current": "strings/labels only", "target": "preserve available typed branches and explicit missing branches"},
+    "wp04_unavailable": {"current": "TV3 503 becomes empty list; other client failures escape", "target": "scoped degraded/manual state without fabricated evidence"},
+    "vlm_or_verifier_unavailable": {"current": "no availability/status boundary; exception escapes", "target": "scoped degraded/manual state"},
+    "reasoning_failure": {"current": "exception escapes", "target": "scoped degraded/manual state"},
+    "invalid_evidence_schema": {"current": "no rich evidence validation boundary", "target": "reject/fail closed before reasoning"},
+    "retry_exhausted": {"current": "no retry", "target": "one retry maximum, then manual/abstain"}
+  }
+}

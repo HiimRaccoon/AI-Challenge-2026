@@ -1,0 +1,12 @@
+{
+  "source": "tracked TV4/WP08/WP09 contracts inspected 2026-08-18",
+  "supported": {
+    "health": {"path": "/health", "fixture": {"status": "ok", "mode": "fixture"}, "degraded": {"status": "degraded", "mode": "live"}},
+    "kis": {"path": "/kis/search", "request": ["query_text", "query_id?", "top_k?"], "response": ["query_id", "candidates"], "canonical": ["video_id", "frame_id", "timestamp_ms", "preprocess_run_id"]},
+    "vqa": {"path": "/vqa/answer", "request": ["query_text", "question", "query_id?", "top_k?", "top_k_answers?"], "response": ["query_id", "results"], "optional": ["confidence", "keyframe_path"], "empty_evidence": "current code gap: rich evidence and safe abstention are T015/T016"},
+    "trake": {"path": "/trake/align", "request": ["query_text", "events?", "query_id?", "strategy?"], "response": ["query_id", "result"], "optional": ["result"]},
+    "exact_neighbors": {"path": "/exact-frame/neighbors", "request": ["video_id", "frame_id", "timestamp_ms", "offsets"], "refuse": ["malformed identity", "fixture payload", "unproven selectable frame"], "degraded": "canonical_identity_unproven"},
+    "feedback": {"path": "/feedback/start", "status": "SUPPORTED", "endpoints": ["/feedback/start", "/feedback/refine", "/feedback/undo", "/feedback/reset", "/feedback/session/{session_id}"]}
+  },
+  "unsupported_schema_policy": "TV4 SearchCandidate.from_json ignores unknown fields; endpoint request models reject unknown behavior is not a published compatibility contract."
+}

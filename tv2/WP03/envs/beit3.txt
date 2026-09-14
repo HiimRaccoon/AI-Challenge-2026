@@ -1,0 +1,9 @@
+# Versions observed in the installed worker; CUDA torch installed separately.
+transformers==4.57.6
+huggingface-hub==0.36.2
+timm==0.4.12
+torchscale==0.2.0
+fairscale==0.4.0
+sentencepiece==0.2.2
+Pillow==11.1.0
+sympy==1.14.0

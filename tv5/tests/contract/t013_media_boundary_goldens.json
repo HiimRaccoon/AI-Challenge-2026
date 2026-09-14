@@ -1,0 +1,54 @@
+{
+  "task": "T013",
+  "classification": "CODE GAP",
+  "scope": "Characterization only; no TV4 media adapter is implemented.",
+  "capabilities": [
+    {
+      "capability": "Original-video streaming",
+      "source_evidence": "WP04 src/aic2026/api.py::stream_video and _video_path",
+      "actual_current_behavior": "GET /videos/{video_id}/stream streams MediaRecord.original_video_path; HEAD returns metadata without a body.",
+      "security_semantics": "video_id is registry-keyed; unknown video_id is 404. The route trusts the registered absolute original_video_path.",
+      "tv4_exposure": "No /videos media route in tracked TV4 api.py.",
+      "current_classification": "CODE GAP",
+      "test_evidence": "test_wp04_actual_http_range_and_read_only_behavior; test_wp04_current_registry_boundary_and_unenforced_policies"
+    },
+    {
+      "capability": "HTTP byte ranges",
+      "source_evidence": "WP04 src/aic2026/api.py::_parse_byte_range, _iter_file_range, stream_video",
+      "actual_current_behavior": "Single byte ranges support closed, open-ended and suffix forms. Valid range GET is 206; malformed, multiple, wrong-unit, reversed and unsatisfiable ranges are 416 with Content-Range bytes */size.",
+      "security_semantics": "No-range GET is FileResponse with Accept-Ranges; HEAD is 200 with Accept-Ranges and Content-Length.",
+      "tv4_exposure": "Absent.",
+      "current_classification": "CODE GAP",
+      "test_evidence": "test_wp04_actual_http_range_and_read_only_behavior"
+    },
+    {
+      "capability": "Original-frame JPEG and timestamp/frame resolution",
+      "source_evidence": "WP04 src/aic2026/api.py::original_frame,resolve; src/aic2026/media.py::FrameResolver",
+      "actual_current_behavior": "GET /frames/{frame_id}.jpg decodes from the original-frame record and returns image/jpeg with X-Original-Frame-Id, X-PTS, X-Timestamp-Ms. /resolve accepts nearest, before, after and returns the record with absolute_error_ms.",
+      "security_semantics": "Frame identity is resolver-record-backed and PTS-timeline-based; bad resolution mode is 422.",
+      "tv4_exposure": "No browser frame-image or resolve transport route in tracked TV4.",
+      "current_classification": "CODE GAP",
+      "test_evidence": "test_wp04_frame_identity_and_timestamp_semantics_are_source_backed; upstream tests/integration/test_preprocessing_api.py"
+    },
+    {
+      "capability": "Path containment, extensions, and symlinks",
+      "source_evidence": "WP04 src/aic2026/api.py::_video_path",
+      "actual_current_behavior": "The stream route has no configured media root, resolved-path containment check, allowed-extension policy, or proxy selection/resolution behavior. It uses original_video_path directly and MIME is guessed from its name.",
+      "security_semantics": "Route-path traversal does not become a registry key (404), but a malicious/trusted-bad MediaRecord absolute path is streamable. A .txt record is also streamable. Thus containment, extension and symlink escape protections are not proven upstream and are T014 requirements.",
+      "tv4_exposure": "Absent; TV4 media_identity.py has a separate exact-neighbor registry resolver, not a browser transport endpoint.",
+      "current_classification": "CODE GAP",
+      "test_evidence": "test_wp04_current_registry_boundary_and_unenforced_policies"
+    },
+    {
+      "capability": "Canonical identity boundary",
+      "source_evidence": "WP04 original-frame headers/FrameResolver; TV4 api.py::exact_frame_neighbors; TV4 exact_identity.py",
+      "actual_current_behavior": "Playback bytes and JPEG headers expose media metadata only. Canonical selection remains backend proof-based through the accepted exact-neighbor boundary; browser playback cannot create a canonical frame_id.",
+      "security_semantics": "No proxy-resolution behavior is implemented by the WP04 stream route; no new identity schema is inferred by T013.",
+      "tv4_exposure": "Only POST /exact-frame/neighbors exists for certified original-frame inspection; browser media transport is absent.",
+      "current_classification": "CODE GAP",
+      "test_evidence": "test_wp04_frame_identity_and_timestamp_semantics_are_source_backed; existing test_current_boundary_goldens.py"
+    }
+  ],
+  "platform_note": "T013 attempts a temporary symlink only when Windows permits it. If creation is denied, the test has no skip: it asserts the actual WP04 route lacks resolved-path containment, which is the relevant current security fact.",
+  "t014_requirements_observed": ["configured authoritative registry/root", "resolved-path containment including symlink escape", "allowed media extensions", "read-only browser-safe Range/image transport", "original identity preservation without playback-derived frame IDs"]
+}

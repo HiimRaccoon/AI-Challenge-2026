@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  tv4:
+    build:
+      context: ../../tv4
+      dockerfile: Dockerfile
+    container_name: aic226_tv4_backend
+    restart: unless-stopped
+    ports:
+      - "${TV4_PORT:-8200}:8200"
+    environment:
+      - TV4_CONFIG=/app/configs/default.yaml
+      - TV4_EXACT_CERTIFICATION_PATH=/app/certifications/run_v1_batch1.json
+      - TV1_BASE_URL=${TV1_URL:-http://127.0.0.1:8000}
+      - TV3_BASE_URL=${WP04_URL:-http://127.0.0.1:8100}
+      - TV4_FIXTURE_MODE=${TV4_FIXTURE_MODE:-0}
+    volumes:
+      # Read-only mounts for upstream raw video and preprocessing artifacts
+      - "${RAW_VIDEO_ROOT:-D:/aic226/tv1/data/raw}:/data/raw:ro"
+      - "${RUNS_ROOT:-D:/aic226/tv1/data/runs}:/data/runs:ro"
+      - "${WP03_ARTIFACT_ROOT:-D:/aic226/tv2_1/WP03/artifacts/full-run-1}:/data/wp03:ro"
+      - "${WP09_ROOT:-D:/aic226/tv2_1/WP09}:/data/wp09:ro"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8200/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  wp13:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: aic226_wp13_frontend
+    restart: unless-stopped
+    ports:
+      - "${WP13_PORT:-5173}:5173"
+    environment:
+      - VITE_TV4_BASE_URL=http://tv4:8200
+      - VITE_SYSTEM_MODE=${VITE_SYSTEM_MODE:-live}
+    volumes:
+      # Mutable volume for WP13 local state, exports, and telemetry ONLY
+      - wp13_state:/app/state
+    depends_on:
+      tv4:
+        condition: service_healthy
+
+volumes:
+  wp13_state:
+    name: aic226_wp13_state

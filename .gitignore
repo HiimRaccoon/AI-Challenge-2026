@@ -1,0 +1,115 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dll
+*.pyd
+
+# Python Virtual Environments
+.venv*/
+venv*/
+env*/
+ENV*/
+.venvs/
+*.env
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build outputs & caches
+dist/
+build/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Large Datasets, Raw Videos, Keyframes, Audio
+**/data/raw/
+**/data/runs/
+**/data/videos/
+**/data/keyframes/
+*.mp4
+*.mkv
+*.avi
+*.wav
+*.mp3
+*.flac
+
+# Large Model Weights (Binary weights)
+weights/
+*.pth
+*.pt
+*.bin
+*.onnx
+*.safetensors
+*.ckpt
+
+# Temporary & backup files
+*.tmp
+*.bak
+*_backup/
+_merge_backup/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local datasets, submissions and handoff exports (never publish)
+/DATASETS_ZIP/
+/datasetzip/
+*.zip
+*.7z
+*.rar
+/.git - Copy/
+/.docx_venv/
+/_github_export*/
+/_github_export*_manifest.json
+/_hf_export*/
+/_handoff_check*/
+/.venv-handoff/
+/AIC26Round*/
+/SOTUYEN*-bo-de-thi/
+/THUNGHIEM-bo-de-thi*/
+/submission*/
+/evaluation/
+/*.docx
+/*.tex
+/BAO_CAO_*.md
+/TOM_TAT_*.md
+/phan_tich_*.md
+/manifest_round*.json
+/benchmark_*.py
+/summarize_*.py
+/validate_retrieval_repairs.py
+/test_predictions_validator.py
+/build_technical_report_docx.py
+/expand_docx_service_roles.py
+
+# Generated artifacts, temporary tests, private configuration
+.pytest*/
+pytest-cache-files-*/
+.cache/
+*.out
+*.err
+**/data/inputs/
+**/outputs/
+**/third_party/
+**/checkpoints.lock.json
+.env.*
+!.env.example
+!*.env.example
+*.local.yaml
+
+# Dependency specifications are source files, not virtual environments.
+!tv2/WP03/envs/
+!tv2/WP03/envs/*.txt

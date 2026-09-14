@@ -12,6 +12,7 @@ dynamic/learned fusion after ablation shows it wins.
 from __future__ import annotations
 
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 
@@ -27,6 +28,19 @@ _OBJECT_HINTS = re.compile(
     r"\b(áo|xe|chó|mèo|bàn|ghế|laptop|điện thoại|xe máy|ô tô|người|car|dog|cat|phone)\b", re.I
 )
 
+_LECTURE_TEXT_HINTS = re.compile(
+    r"\b(bai giang|giang bai|giao vien|slide|lecture|lesson|teacher|"
+    r"de thi|cau hoi so|question number|exam question)\b",
+    re.I,
+)
+
+
+def _fold_text(text: str) -> str:
+    return "".join(
+        char for char in unicodedata.normalize("NFD", text.casefold())
+        if unicodedata.category(char) != "Mn"
+    ).replace("đ", "d")
+
 
 @dataclass(frozen=True)
 class RouteDecision:
@@ -40,9 +54,10 @@ def _new_query_id(prefix: str) -> str:
 
 def _branches_for_text(text: str, *, include_metadata: bool) -> tuple[str, ...]:
     branches = ["visual"]
-    if _OCR_HINTS.search(text):
+    lecture_text = bool(_LECTURE_TEXT_HINTS.search(_fold_text(text)))
+    if _OCR_HINTS.search(text) or lecture_text:
         branches.append("ocr")
-    if _ASR_HINTS.search(text):
+    if _ASR_HINTS.search(text) or lecture_text:
         branches.append("asr")
     if _OBJECT_HINTS.search(text):
         branches.append("object")
@@ -63,7 +78,12 @@ def route_kis(query_text: str, *, query_id: str | None = None, limit: int = 100)
 
 
 def route_qa(description: str, question: str, *, query_id: str | None = None, limit: int = 100) -> RouteDecision:
-    """Q&A / VQA: same localization as KIS, plus the question drives evidence gathering."""
+    """Q&A / VQA: retrieve every textual modality before answering.
+
+    A question such as "ở đâu?" has no lexical ASR cue, but its answer is
+    commonly spoken.  VQA therefore cannot rely on KIS's optional cue router:
+    it searches visual, OCR, ASR, objects, and metadata for each query.
+    """
     request = SearchRequest(
         query_id=query_id or _new_query_id("qa"),
         task="VQA",
@@ -71,8 +91,7 @@ def route_qa(description: str, question: str, *, query_id: str | None = None, li
         question=question,
         limit=limit,
     )
-    combined = f"{description} {question}"
-    return RouteDecision(request, _branches_for_text(combined, include_metadata=False))
+    return RouteDecision(request, ("visual", "ocr", "asr", "object", "metadata"))
 
 
 _EVENT_SPLIT = re.compile(r"\(\d+\)\s*|;\s*|\n+")
@@ -96,18 +115,7 @@ def split_trake_events(query_text: str) -> list[str]:
 
 
 def _looks_like_intro(fragment: str) -> bool:
-    # `and` binds tighter than `or`, so the original
-    # `keyword_match and has_colon or ends_with_colon` actually evaluated as
-    # `(keyword_match and has_colon) or ends_with_colon` — the trailing
-    # `or ends_with_colon` made the keyword check meaningless: ANY fragment
-    # ending in ":" (e.g. a legitimate TRAKE event that happens to end with
-    # a colon) was misclassified as an intro and dropped from the event
-    # list. The keyword prefix is what actually distinguishes an intro
-    # ("Tìm đoạn video: ...") from a real event, so require it always;
-    # having a colon (anywhere, including at the end) is the secondary
-    # signal.
-    starts_with_keyword = bool(re.match(r"^(tìm|find|xác định|liệt kê)\b", fragment, re.I))
-    return starts_with_keyword and ":" in fragment
+    return bool(re.match(r"^(tìm|find|xác định|liệt kê)\b", fragment, re.I)) and ":" in fragment or fragment.endswith(":")
 
 
 def route_trake(query_text: str, events: list[str] | None = None, *, query_id: str | None = None, limit: int = 100) -> RouteDecision:

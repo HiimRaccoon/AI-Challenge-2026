@@ -1,2 +1,9 @@
 PyYAML>=6.0
 pytest>=7.4
+# Required by /exact-frame/image to decode the already-certified original
+# frame into a JPEG preview.  WP09 uses PyAV for proof; TV4 must also have it
+# to render that same proof record.
+av>=12.0
+# ``VideoFrame.to_image()`` used by the exact-frame endpoint encodes through
+# Pillow, so install it alongside PyAV rather than failing at request time.
+Pillow>=10.0

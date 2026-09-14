@@ -1,0 +1,84 @@
+{
+  "task": "T019",
+  "name": "WP08 Feedback Seam Characterization and Boundary Goldens",
+  "authority": [
+    "AIC2026_Pipeline_Final.md §2.2, §3 Invariant 12/18/21",
+    "WP13 specs/001-contest-ready-wp13/contracts/wp13-boundaries.md §WP08 Feedback boundary",
+    "WP13 specs/001-contest-ready-wp13/spec.md FR-059, FR-060, User Story 13",
+    "TV2/WP08 tracked source contracts.py, service.py, store.py, text.py, ranking.py, wp03_adapter.py"
+  ],
+  "classification": {
+    "wp08_core_capability": "SUPPORTED",
+    "tv4_feedback_seam": "CODE GAP",
+    "advanced_composed_model": "SCOPED DEGRADATION",
+    "basket_isolation": "SUPPORTED"
+  },
+  "contracts": {
+    "wp08_request_models": {
+      "start_session": {
+        "required": ["session_id", "original_query"],
+        "validation": "original_query non-empty str"
+      },
+      "refine": {
+        "required": ["session_id", "selected", "feedback_text", "expected_revision"],
+        "types": {
+          "session_id": "str",
+          "selected": "CandidateId(video_id: str, frame_id: int)",
+          "feedback_text": "str (1-300 chars, non-whitespace)",
+          "expected_revision": "int"
+        },
+        "validation": [
+          "expected_revision must match session revision (CAS)",
+          "selected must be in current rendered candidates",
+          "events count <= 5",
+          "token budget <= 64 tokens"
+        ]
+      },
+      "undo": {
+        "required": ["session_id", "expected_revision"]
+      },
+      "reset": {
+        "required": ["session_id", "expected_revision"]
+      },
+      "confirm": {
+        "required": ["session_id", "selected", "expected_revision"]
+      },
+      "record_correct": {
+        "required": ["session_id", "selected", "expected_revision"]
+      }
+    },
+    "wp08_response_models": {
+      "SessionView": {
+        "fields": ["session_id", "revision", "candidates", "expires_at_utc", "wp03_run_id"],
+        "candidates_item": ["candidate_id", "display_rank", "timestamp_ms", "keyframe_path"]
+      },
+      "Confirmation": {
+        "fields": ["confirmation_id", "session_id", "revision", "candidate_id", "created_at_utc"]
+      },
+      "FirstCorrect": {
+        "fields": ["session_id", "revision", "candidate_id", "cohort", "recorded_at_utc", "elapsed_ms"]
+      }
+    },
+    "invariants": {
+      "original_query_preservation": "original_query stored immutably, prepended to every feedback template, preserved across refine/undo/reset",
+      "canonical_candidate_identity": "CandidateId(video_id: str, frame_id: int) strictly validated; no local frame/PTS/FPS arithmetic",
+      "optimistic_cas_revision": "Mutations require expected_revision matching current state, increments on refine (+1), undo (+1), reset (+1)",
+      "max_active_events": 5,
+      "max_text_length": 300,
+      "max_token_budget": 64,
+      "max_rendered_candidates": 100,
+      "basket_isolation": "Feedback operations NEVER modify submission basket entries"
+    },
+    "tv4_t020_gap_specification": {
+      "missing_adapter": "tv4.adapters.wp08_adapter / tv4.clients.wp08_client",
+      "missing_endpoints": [
+        "POST /feedback/start",
+        "POST /feedback/refine",
+        "POST /feedback/undo",
+        "POST /feedback/reset",
+        "GET /feedback/session/{session_id}"
+      ],
+      "health_reporting": "feedback must be reported as CODE GAP until endpoints implemented"
+    }
+  }
+}

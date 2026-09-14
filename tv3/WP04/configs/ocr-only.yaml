@@ -1,0 +1,21 @@
+schema_version: "1.0.0"
+normalization_version: "vi-unicode-lower-fold-v1"
+modalities:
+  ocr:
+    enabled: true
+    model:
+      name: craft-parseq-vn
+      version: local-http-batch-v1
+      factory: "wp04.runtime_adapters:build_ocr_adapter"
+    settings:
+      command_env: WP04_OCR_COMMAND
+      server_url: http://127.0.0.1:8765
+    confidence_threshold: 0.35
+    batch_size: 8
+    device: cuda
+  asr:
+    enabled: false
+  object:
+    enabled: false
+  metadata:
+    enabled: true
