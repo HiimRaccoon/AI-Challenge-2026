@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="UI/Logo.png" width="220" alt="SS009.Q24 Logo">
+  <img src="UI/Logo.png" width="340" alt="SS009.Q24 Logo">
 </p>
 
 <h1 align="center">AIC2026 – Multimodal Video Retrieval & Verification System</h1>
@@ -136,6 +136,21 @@ Canonical Frame Selection
 
 Sau retrieval, người dùng kiểm tra lại candidate trên video và timeline trước khi lựa chọn frame cuối cùng.
 
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="UI/KIS_1.jpg" width="100%" alt="KIS Retrieval Workspace">
+      <br>
+      <em>Query & Retrieval Workspace</em>
+    </td>
+    <td align="center" width="50%">
+      <img src="UI/KIS_2.jpg" width="100%" alt="KIS Inspection Workspace">
+      <br>
+      <em>Video & Frame Inspection Workspace</em>
+    </td>
+  </tr>
+</table>
+
 ### VQA – Visual Question Answering
 
 VQA không chỉ yêu cầu tìm đúng video mà còn cần xác định evidence liên quan đến câu hỏi và supporting frame tương ứng.
@@ -194,27 +209,39 @@ Candidate do hệ thống tìm được chưa được xem ngay là kết quả 
 
 ## System Interface
 
-Giao diện được xây dựng bằng **React + TypeScript** theo hướng một **inspection cockpit**, giúp người dùng thực hiện toàn bộ quy trình từ nhập query, xem candidate, kiểm tra video đến chọn frame cuối cùng.
+Giao diện được xây dựng bằng **React + TypeScript** theo hướng một **inspection cockpit**, giúp người dùng thực hiện toàn bộ quy trình từ nhập truy vấn, xem candidate, kiểm tra video, quản lý evidence đến hậu kiểm kết quả trước khi nộp.
 
-### Query & Retrieval Workspace
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="UI/SystemInterface_1.jpeg" width="100%" alt="Query and Retrieval Workspace">
+      <br>
+      <b>Query & Retrieval Workspace</b><br>
+      <sub>Nhập mô tả sự kiện, tùy chỉnh các tín hiệu retrieval và xem danh sách candidate.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="UI/SystemInterface_2.jpeg" width="100%" alt="Inspection Workspace">
+      <br>
+      <b>Inspection Workspace</b><br>
+      <sub>Đối soát video gốc, timeline, canonical frame và các keyframe lân cận.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+      <img src="UI/SystemInterface_3.jpeg" width="100%" alt="Evidence and Submission Management">
+      <br>
+      <b>Evidence & Submission Management</b><br>
+      <sub>Quản lý evidence, lưu kết quả vào Submission Basket và theo dõi danh sách nộp.</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="UI/SystemInterface_4.jpeg" width="100%" alt="Submission Verifier">
+      <br>
+      <b>Submission Verifier</b><br>
+      <sub>Hậu kiểm kết quả KIS/VQA/TRAKE, vi chỉnh frame và chuẩn bị dữ liệu nộp.</sub>
+    </td>
+  </tr>
+</table>
 
-Giao diện KIS hiển thị danh sách candidate được trả về từ hệ thống retrieval, cho phép người dùng quan sát nhanh nhiều frame và lựa chọn candidate cần kiểm tra sâu hơn.
-
-<p align="center">
-  <img src="UI/KIS_1.jpg" width="1000" alt="KIS Retrieval Workspace">
-  <br>
-  <em>Query & Retrieval Workspace.</em>
-</p>
-
-### Inspection Workspace
-
-Sau khi chọn candidate, người dùng có thể kiểm tra trực tiếp video gốc, timeline và các frame lân cận để xác định canonical frame chính xác trước khi nộp.
-
-<p align="center">
-  <img src="UI/KIS_2.jpg" width="1000" alt="KIS Inspection Workspace">
-  <br>
-  <em>Video & Frame Inspection Workspace.</em>
-</p>
 
 ---
 
