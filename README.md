@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="UI/Logo.png" width="340" alt="SS009.Q24 Logo">
+  <img src="UI/Logo.png" width="1000" alt="SS009.Q24 Logo">
 </p>
 
 <h1 align="center">AIC2026 – Multimodal Video Retrieval & Verification System</h1>
@@ -146,7 +146,7 @@ Sau retrieval, người dùng kiểm tra lại candidate trên video và timelin
     <td align="center" width="50%">
       <img src="UI/KIS_2.jpg" width="100%" alt="KIS Inspection Workspace">
       <br>
-      <em>Video & Frame Inspection Workspace</em>
+      <em>Inspection Workspace</em>
     </td>
   </tr>
 </table>
@@ -209,38 +209,47 @@ Candidate do hệ thống tìm được chưa được xem ngay là kết quả 
 
 ## System Interface
 
-Giao diện được xây dựng bằng **React + TypeScript** theo hướng một **inspection cockpit**, giúp người dùng thực hiện toàn bộ quy trình từ nhập truy vấn, xem candidate, kiểm tra video, quản lý evidence đến hậu kiểm kết quả trước khi nộp.
+Giao diện được xây dựng bằng **React + TypeScript** theo hướng một **inspection cockpit**, hỗ trợ người dùng đi xuyên suốt từ bước truy vấn, kiểm tra candidate, đối soát video và evidence cho đến hậu kiểm kết quả trước khi nộp.
 
-<table>
-  <tr>
-    <td align="center" width="50%">
-      <img src="UI/SystemInterface_1.jpeg" width="100%" alt="Query and Retrieval Workspace">
-      <br>
-      <b>Query & Retrieval Workspace</b><br>
-      <sub>Nhập mô tả sự kiện, tùy chỉnh các tín hiệu retrieval và xem danh sách candidate.</sub>
-    </td>
-    <td align="center" width="50%">
-      <img src="UI/SystemInterface_2.jpeg" width="100%" alt="Inspection Workspace">
-      <br>
-      <b>Inspection Workspace</b><br>
-      <sub>Đối soát video gốc, timeline, canonical frame và các keyframe lân cận.</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <img src="UI/SystemInterface_3.jpeg" width="100%" alt="Evidence and Submission Management">
-      <br>
-      <b>Evidence & Submission Management</b><br>
-      <sub>Quản lý evidence, lưu kết quả vào Submission Basket và theo dõi danh sách nộp.</sub>
-    </td>
-    <td align="center" width="50%">
-      <img src="UI/SystemInterface_4.jpeg" width="100%" alt="Submission Verifier">
-      <br>
-      <b>Submission Verifier</b><br>
-      <sub>Hậu kiểm kết quả KIS/VQA/TRAKE, vi chỉnh frame và chuẩn bị dữ liệu nộp.</sub>
-    </td>
-  </tr>
-</table>
+### Query & Retrieval Workspace
+
+Đây là khu vực bắt đầu của quy trình truy xuất. Người dùng nhập mô tả sự kiện, tùy chỉnh các tín hiệu đa phương thức như **Visual, OCR, ASR và Object**, sau đó xem danh sách candidate được hệ thống trả về.
+
+<p align="center">
+  <img src="UI/SystemInterface_1.jpeg" width="1000" alt="Query and Retrieval Workspace">
+  <br>
+  <em>Query & Retrieval Workspace.</em>
+</p>
+
+### Inspection Workspace
+
+Sau khi chọn candidate tiềm năng, người dùng chuyển sang khu vực inspection để đối soát trực tiếp với video gốc. Giao diện hỗ trợ xem **timeline**, kiểm tra **Exact Canonical Frame** và duyệt các keyframe lân cận nhằm xác định đúng frame cần chọn.
+
+<p align="center">
+  <img src="UI/SystemInterface_2.jpeg" width="1000" alt="Inspection Workspace">
+  <br>
+  <em>Inspection Workspace.</em>
+</p>
+
+### Evidence & Submission Management
+
+Khu vực này dùng để quản lý evidence và các kết quả đã được lựa chọn. Người dùng có thể gom candidate vào **Submission Basket**, theo dõi danh sách kết quả và chuẩn bị dữ liệu trước bước hậu kiểm cuối cùng.
+
+<p align="center">
+  <img src="UI/SystemInterface_3.jpeg" width="1000" alt="Evidence and Submission Management">
+  <br>
+  <em>Evidence & Submission Management.</em>
+</p>
+
+### Submission Verifier
+
+Đây là bước hậu kiểm trước khi xuất kết quả nộp. Giao diện cho phép kiểm tra lại các kết quả **KIS/VQA/TRAKE**, vi chỉnh mốc frame lân cận và xác nhận dữ liệu trước khi tạo submission cuối cùng.
+
+<p align="center">
+  <img src="UI/SystemInterface_4.jpeg" width="1000" alt="Submission Verifier">
+  <br>
+  <em>Submission Verifier.</em>
+</p>
 
 
 ---
