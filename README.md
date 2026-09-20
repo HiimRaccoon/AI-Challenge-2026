@@ -226,7 +226,7 @@ Giao diện được xây dựng bằng **React + TypeScript** theo hướng m�
 Sau khi chọn candidate tiềm năng, người dùng chuyển sang khu vực inspection để đối soát trực tiếp với video gốc. Giao diện hỗ trợ xem **timeline**, kiểm tra **Exact Canonical Frame** và duyệt các keyframe lân cận nhằm xác định đúng frame cần chọn.
 
 <p align="center">
-  <img src="UI/SystemInterface_2.jpeg" width="1000" alt="Inspection Workspace">
+  <img src="UI/SystemInterface_22.jpeg" width="1000" alt="Inspection Workspace">
   <br>
   <em>Inspection Workspace.</em>
 </p>
@@ -236,7 +236,7 @@ Sau khi chọn candidate tiềm năng, người dùng chuyển sang khu vực in
 Khu vực này dùng để quản lý evidence và các kết quả đã được lựa chọn. Người dùng có thể gom candidate vào **Submission Basket**, theo dõi danh sách kết quả và chuẩn bị dữ liệu trước bước hậu kiểm cuối cùng.
 
 <p align="center">
-  <img src="UI/SystemInterface_3.jpeg" width="1000" alt="Evidence and Submission Management">
+  <img src="UI/SystemInterface_32.jpeg" width="1000" alt="Evidence and Submission Management">
   <br>
   <em>Evidence & Submission Management.</em>
 </p>
@@ -246,7 +246,7 @@ Khu vực này dùng để quản lý evidence và các kết quả đã đượ
 Đây là bước hậu kiểm trước khi xuất kết quả nộp. Giao diện cho phép kiểm tra lại các kết quả **KIS/VQA/TRAKE**, vi chỉnh mốc frame lân cận và xác nhận dữ liệu trước khi tạo submission cuối cùng.
 
 <p align="center">
-  <img src="UI/SystemInterface_4.jpeg" width="1000" alt="Submission Verifier">
+  <img src="UI/SystemInterface_42.jpeg" width="1000" alt="Submission Verifier">
   <br>
   <em>Submission Verifier.</em>
 </p>
@@ -277,31 +277,4 @@ README này tập trung vào việc giới thiệu tổng quan hệ thống, ph�
 
 Hướng dẫn chi tiết về cài đặt môi trường, dependency, dataset, model, preprocessing, build index, chạy backend/frontend và troubleshooting được đặt trong:
 
-### ➡️ [SETUP.md](SETUP.md)
-
----
-
-## Notes
-
-Trong quá trình phát triển có nhiều module thử nghiệm và không phải tất cả đều được bật trong cùng một runtime configuration.
-
-Khi tái lập hệ thống cần chú ý đến source code version, runtime configuration, model đang được kích hoạt và artifact/index tương ứng.
-
-Với những candidate gần nhau về nội dung hoặc thời gian, bước kiểm tra thủ công trên video và canonical frame vẫn đóng vai trò quan trọng.
-
----
-
-## Achievement
-
-**AI Challenge Thành phố Hồ Chí Minh 2026**
-
-- **Team:** SS009.Q24
-- **Score:** **72.2 / 84**
-
----
-
-## Team
-
-**SS009.Q24**
-
-AI Challenge Thành phố Hồ Chí Minh 2026
+### [SETUP.md](SETUP.md)
