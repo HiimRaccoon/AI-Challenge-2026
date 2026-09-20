@@ -141,12 +141,12 @@ Sau retrieval, người dùng kiểm tra lại candidate trên video và timelin
     <td align="center" width="50%">
       <img src="UI/KIS_1.jpg" width="100%" alt="KIS Retrieval Workspace">
       <br>
-      <em>Query & Retrieval Workspace</em>
+      <em>Giao diện xử lý KIS</em>
     </td>
     <td align="center" width="50%">
       <img src="UI/KIS_2.jpg" width="100%" alt="KIS Inspection Workspace">
       <br>
-      <em>Inspection Workspace</em>
+      <em>Giao diện xử lý KIS</em>
     </td>
   </tr>
 </table>
