@@ -7,7 +7,7 @@
 <p align="center">
   <b>AI Challenge Thành phố Hồ Chí Minh 2026</b><br>
   Team <b>SS009.Q24</b><br>
-  <b>Score: 74.2 / 84</b>
+  Score: <b>74.2 / 84</b>
 </p>
 
 ---
@@ -21,8 +21,6 @@ Hệ thống hỗ trợ ba dạng tác vụ chính:
 - **KIS – Known-Item Search**
 - **VQA – Visual Question Answering**
 - **TRAKE – Temporal Retrieval and Alignment of Key Events**
-
-Trong quá trình thi, đội **SS009.Q24** đạt **72.2 / 84 điểm**.
 
 Mục tiêu của hệ thống là hỗ trợ người dùng tìm nhanh video/frame phù hợp từ tập dữ liệu lớn, sau đó kiểm tra lại kết quả trên video gốc, timeline và canonical frame trước khi lựa chọn kết quả cuối cùng.
 
