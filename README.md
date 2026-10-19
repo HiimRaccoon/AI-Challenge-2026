@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>AI Challenge Thành phố Hồ Chí Minh 2026</b><br>
-  Đội <b>SS009.Q24</b><br>
-  <b>Score: 72.2 / 84</b>
+  Team <b>SS009.Q24</b><br>
+  <b>Score: 74.2 / 84</b>
 </p>
 
 ---
